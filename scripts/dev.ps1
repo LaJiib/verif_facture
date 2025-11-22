@@ -10,7 +10,7 @@ if (-not (Test-Path $python)) {
     $python = "python"
 }
 
-$backendCmd = "$python -m uvicorn backend.api:app --reload --port 8000 --log-level debug"
+$backendCmd = "$python -m uvicorn backend.api:app --reload --port 8000 --log-level warning"
 $frontendCmd = "npm run dev -- --host --port 5173"
 
 Write-Host "Starting backend (uvicorn)..." -ForegroundColor Cyan
