@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 interface CompteACreer {
   num: string;
@@ -8,7 +8,7 @@ interface CompteACreer {
 
 interface CompteConfirmationModalProps {
   comptesACreer: CompteACreer[];
-  onConfirm: (comptesSelectionnes: Set<string>) => void;
+  onConfirm: (comptesSelectionnes: Set<string>, comptesMisesAJour: CompteACreer[]) => void;
   onCancel: () => void;
 }
 
@@ -17,9 +17,14 @@ export default function CompteConfirmationModal({
   onConfirm,
   onCancel,
 }: CompteConfirmationModalProps) {
-  const [selectedComptes, setSelectedComptes] = useState<Set<string>>(
-    new Set(comptesACreer.map((c) => c.num))
-  );
+  const [selectedComptes, setSelectedComptes] = useState<Set<string>>(new Set(comptesACreer.map((c) => c.num)));
+  const [localComptes, setLocalComptes] = useState<CompteACreer[]>(comptesACreer);
+  const [editing, setEditing] = useState<{ num: string; nom: string; lot: string } | null>(null);
+
+  useEffect(() => {
+    setSelectedComptes(new Set(comptesACreer.map((c) => c.num)));
+    setLocalComptes(comptesACreer);
+  }, [comptesACreer]);
 
   function toggleCompte(num: string) {
     const newSet = new Set(selectedComptes);
@@ -40,7 +45,21 @@ export default function CompteConfirmationModal({
   }
 
   function handleConfirm() {
-    onConfirm(selectedComptes);
+    onConfirm(selectedComptes, localComptes);
+  }
+
+  function openEdit(compte: CompteACreer) {
+    setEditing({ num: compte.num, nom: compte.nom, lot: compte.lot });
+  }
+
+  function saveEdit() {
+    if (!editing) return;
+    const nom = editing.nom.trim() || `Compte ${editing.num}`;
+    const lot = editing.lot.trim() || "Non défini";
+    setLocalComptes((prev) =>
+      prev.map((c) => (c.num === editing.num ? { ...c, nom, lot } : c))
+    );
+    setEditing(null);
   }
 
   return (
@@ -121,7 +140,7 @@ export default function CompteConfirmationModal({
             overflow: "auto",
           }}
         >
-          {comptesACreer.map((compte) => (
+          {localComptes.map((compte) => (
             <div
               key={compte.num}
               style={{
@@ -146,13 +165,37 @@ export default function CompteConfirmationModal({
                 }}
               />
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: "600", marginBottom: "0.25rem" }}>
+                <div
+                  style={{ fontWeight: "600", marginBottom: "0.25rem" }}
+                  title="Cliquer pour modifier nom ou lot"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openEdit(compte);
+                  }}
+                >
                   {compte.nom}
                 </div>
                 <div style={{ fontSize: "0.875rem", color: "#6b7280" }}>
                   N° {compte.num} • Lot: {compte.lot}
                 </div>
               </div>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openEdit(compte);
+                }}
+                style={{
+                  border: "1px solid #d1d5db",
+                  background: "white",
+                  padding: "0.35rem 0.6rem",
+                  borderRadius: "0.35rem",
+                  cursor: "pointer",
+                  fontSize: "0.8rem",
+                  color: "#374151",
+                }}
+              >
+                Modifier
+              </button>
             </div>
           ))}
         </div>
@@ -196,6 +239,108 @@ export default function CompteConfirmationModal({
           </button>
         </div>
       </div>
+
+      {editing && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0, 0, 0, 0.5)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1100,
+          }}
+          onClick={() => setEditing(null)}
+        >
+          <div
+            style={{
+              background: "white",
+              borderRadius: "0.65rem",
+              padding: "1.25rem",
+              width: "90%",
+              maxWidth: "450px",
+              boxShadow: "0 10px 25px rgba(0,0,0,0.3)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <h3 style={{ margin: 0 }}>Éditer le compte {editing.num}</h3>
+              <button
+                onClick={() => setEditing(null)}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  fontSize: "1.25rem",
+                  cursor: "pointer",
+                  color: "#6b7280",
+                }}
+                aria-label="Fermer"
+              >
+                ×
+              </button>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", marginTop: "1rem" }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: "0.35rem", fontWeight: 600 }}>
+                Nom du compte
+                <input
+                  value={editing.nom}
+                  onChange={(e) => setEditing({ ...editing, nom: e.target.value })}
+                  style={{
+                    padding: "0.6rem 0.75rem",
+                    borderRadius: "0.45rem",
+                    border: "1px solid #d1d5db",
+                  }}
+                />
+              </label>
+
+              <label style={{ display: "flex", flexDirection: "column", gap: "0.35rem", fontWeight: 600 }}>
+                Lot
+                <input
+                  value={editing.lot}
+                  onChange={(e) => setEditing({ ...editing, lot: e.target.value })}
+                  style={{
+                    padding: "0.6rem 0.75rem",
+                    borderRadius: "0.45rem",
+                    border: "1px solid #d1d5db",
+                  }}
+                />
+              </label>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1.25rem" }}>
+              <button
+                onClick={() => setEditing(null)}
+                style={{
+                  padding: "0.5rem 1.2rem",
+                  background: "white",
+                  border: "1px solid #d1d5db",
+                  borderRadius: "0.45rem",
+                  cursor: "pointer",
+                  color: "#374151",
+                }}
+              >
+                Annuler
+              </button>
+              <button
+                onClick={saveEdit}
+                style={{
+                  padding: "0.5rem 1.2rem",
+                  background: "#2563eb",
+                  color: "white",
+                  border: "none",
+                  borderRadius: "0.45rem",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                Enregistrer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

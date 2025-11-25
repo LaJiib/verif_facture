@@ -221,13 +221,15 @@ function detectTypeLigne(typeAcces: string | undefined, libelleDetail: string | 
 
 interface LigneData {
   numeroCompte: string;
-  numeroAcces: string;
+  numeroAcces: string | null;
   numeroFacture: string;
   date: string;
   type: string;
   montantHT: number;
   niveauCharge: string;
   typeCharge: string;
+  libelleDetail: string;
+  rubriqueFacture?: string;
 }
 
 function extractLignesData(rows: CSVRow[]): LigneData[] {
@@ -236,16 +238,17 @@ function extractLignesData(rows: CSVRow[]): LigneData[] {
 
   for (const row of rows) {
     const numeroCompte = row["Numéro compte"]?.trim();
-    const numeroAcces = row["Numéro accès"]?.trim();
+    const numeroAcces = row["Numéro accès"]?.trim() || null;
     const numeroFacture = row["Numéro facture"]?.trim();
     const dateStr = row["Date"]?.trim();
     const typeAcces = row["Type d'accès"]?.trim();
     const libelleDetail = row["Libellé ligne facture"]?.trim();
+    const rubriqueFacture = row["Rubrique facture"]?.trim();
     const montantHT = parseFloat(row["Montant (€ HT)"]?.replace(",", ".") || "0");
     const niveauCharge = row["Niveau de charge"]?.trim()?.toLowerCase() || "";
     const typeCharge = row["Type de charge"]?.trim()?.toLowerCase() || "";
 
-    if (!numeroCompte || !numeroAcces || !numeroFacture || !dateStr) {
+    if (!numeroCompte || !numeroFacture || !dateStr) {
       skippedRows++;
       if (skippedRows <= 3) {
         console.warn(`[CSV Import] ⚠️ Ligne ignorée (manque données):`, {
@@ -271,6 +274,8 @@ function extractLignesData(rows: CSVRow[]): LigneData[] {
       montantHT,
       niveauCharge,
       typeCharge,
+      libelleDetail: libelleDetail || "",
+      rubriqueFacture,
     });
   }
 
@@ -303,6 +308,65 @@ interface FactureAgregee {
   }[];
 }
 
+function normalizeText(...parts: string[]): string {
+  return parts
+    .join(" ")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function categorizeMontant(ligne: LigneData): "abo" | "conso" | "achat" | "remises" {
+  const info = normalizeText(
+    ligne.niveauCharge,
+    ligne.typeCharge,
+    ligne.libelleDetail,
+    ligne.rubriqueFacture || "",
+    ligne.type
+  );
+  const rubrique = normalizeText(ligne.rubriqueFacture || "");
+  const isNegative = ligne.montantHT < 0;
+  const isRemiseKeyword = isNegative || /remise|avoir|credit|rembourse|rabais|geste commercial/.test(info);
+
+  // 1) Utiliser la rubrique pour déterminer la famille principale
+  let base: "abo" | "conso" | "achat" | null = null;
+  if (rubrique) {
+    if (/forfait|formule|option|abonnement|offre/.test(rubrique)) {
+      base = "abo";
+    } else if (/conso|consommation|usage|trafic/.test(rubrique)) {
+      base = "conso";
+    } else if (/achat|terminaux|accessoires|equipement|appareil|device|services?\s+ponctuels?/.test(rubrique)) {
+      base = "achat";
+    }
+  }
+
+  if (base) {
+    if ((base === "abo" || base === "conso") && isRemiseKeyword) {
+      return "remises";
+    }
+    return base;
+  }
+
+  // 2) Fallback heuristique si rubrique absente/inconnue
+  const hasConso =
+    /conso|consommation|usage|hors forfait|communication|appel|voix|sms|mms|data|internet|trafic|roaming/.test(info);
+  const hasForfait = /abo|abonnement|forfait|mensuel|frais fixe|pack|offre|option|formule/.test(info);
+  const achatWords =
+    /achat|terminal|equipement|appareil|device|box|modem|routeur|paiement|location|services?\s+ponctuels?/.test(info);
+  const hasSmartphone = /smartphone/.test(info);
+
+  if (hasConso) {
+    return isRemiseKeyword ? "remises" : "conso";
+  }
+  if (achatWords && (!hasSmartphone || !hasForfait)) {
+    return "achat";
+  }
+  if (hasForfait || hasSmartphone) {
+    return isRemiseKeyword ? "remises" : "abo";
+  }
+  return isRemiseKeyword ? "remises" : "abo";
+}
+
 function aggregateFacturesData(lignesData: LigneData[]): FactureAgregee[] {
   // Map: "numeroCompte|numeroFacture|date" -> FactureAgregee
   const facturesMap = new Map<string, FactureAgregee>();
@@ -325,46 +389,45 @@ function aggregateFacturesData(lignesData: LigneData[]): FactureAgregee[] {
 
     const facture = facturesMap.get(key)!;
 
-    // Déterminer la catégorie du montant
-    const chargeInfo = `${ligne.niveauCharge} ${ligne.typeCharge}`.toLowerCase();
+    // Déterminer la catégorie du montant avec une heuristique plus robuste
+    const category = categorizeMontant(ligne);
     let abo = 0, conso = 0, remises = 0, achat = 0;
 
-    if (chargeInfo.includes("abonnement") || chargeInfo.includes("forfait") || ligne.niveauCharge.includes("abo")) {
+    if (category === "abo") {
       abo = ligne.montantHT;
       facture.abo += ligne.montantHT;
-    } else if (chargeInfo.includes("consommation") || chargeInfo.includes("hors forfait") || chargeInfo.includes("conso")) {
+    } else if (category === "conso") {
       conso = ligne.montantHT;
       facture.conso += ligne.montantHT;
-    } else if (chargeInfo.includes("remise") || chargeInfo.includes("avoir") || chargeInfo.includes("crédit")) {
+    } else if (category === "remises") {
       remises = ligne.montantHT;
       facture.remises += ligne.montantHT;
-    } else if (chargeInfo.includes("achat") || chargeInfo.includes("terminal") || chargeInfo.includes("équipement")) {
+    } else if (category === "achat") {
       achat = ligne.montantHT;
       facture.achat += ligne.montantHT;
-    } else {
-      // Par défaut, on considère comme abonnement
-      abo = ligne.montantHT;
-      facture.abo += ligne.montantHT;
     }
 
     // Trouver ou créer l'entrée pour cette ligne d'accès
-    let ligneEntry = facture.lignes.find(l => l.numeroAcces === ligne.numeroAcces);
-    if (!ligneEntry) {
-      ligneEntry = {
-        numeroAcces: ligne.numeroAcces,
-        type: ligne.type,
-        abo: 0,
-        conso: 0,
-        remises: 0,
-        achat: 0,
-      };
-      facture.lignes.push(ligneEntry);
-    }
+    // N'ajoute une entrée ligne que si un numéro d'accès est présent
+    if (ligne.numeroAcces) {
+      let ligneEntry = facture.lignes.find(l => l.numeroAcces === ligne.numeroAcces);
+      if (!ligneEntry) {
+        ligneEntry = {
+          numeroAcces: ligne.numeroAcces,
+          type: ligne.type,
+          abo: 0,
+          conso: 0,
+          remises: 0,
+          achat: 0,
+        };
+        facture.lignes.push(ligneEntry);
+      }
 
-    ligneEntry.abo += abo;
-    ligneEntry.conso += conso;
-    ligneEntry.remises += remises;
-    ligneEntry.achat += achat;
+      ligneEntry.abo += abo;
+      ligneEntry.conso += conso;
+      ligneEntry.remises += remises;
+      ligneEntry.achat += achat;
+    }
   }
 
   return Array.from(facturesMap.values());
@@ -422,6 +485,7 @@ export async function importCSV(
   file: File,
   entrepriseId: number,
   comptesSelectionnes?: Set<string>, // Si fourni, ne crée que ces comptes
+  comptesOverrides?: CompteACreer[], // Permet d'ajuster nom/lot pour les nouveaux comptes
   onProgress?: (stage: string, percent: number) => void // Callback pour suivre la progression
 ): Promise<ImportResult> {
   console.log(`[CSV Import] 🚀 Début de l'import pour l'entreprise ${entrepriseId}`);
@@ -498,6 +562,8 @@ export async function importCSV(
 
     // 4c. Crée les comptes manquants (seulement ceux sélectionnés)
     const comptesACréer = Array.from(comptesUniques).filter(num => !comptesMap.has(num));
+    const overrideMap = new Map<string, CompteACreer>();
+    (comptesOverrides || []).forEach(c => overrideMap.set(c.num, c));
 
     if (comptesACréer.length > 0) {
       console.log(`[CSV Import] ➕ Création de ${comptesACréer.length} compte(s) de facturation...`);
@@ -510,11 +576,12 @@ export async function importCSV(
         }
 
         try {
+          const override = overrideMap.get(numeroCompte);
           const nouveauCompte = await createCompte({
             num: numeroCompte,
-            nom: `Compte ${numeroCompte}`,
+            nom: override?.nom || `Compte ${numeroCompte}`,
             entreprise_id: entrepriseId,
-            lot: "Non défini",
+            lot: override?.lot || "Non défini",
           });
           comptesMap.set(numeroCompte, nouveauCompte);
           result.stats.comptes_crees++;
@@ -554,6 +621,9 @@ export async function importCSV(
           f.lignes.forEach(l => {
             // Utiliser un Set avec une clé unique pour éviter les doublons
             const key = `${l.numeroAcces}|${l.type}`;
+            if (!l.numeroAcces) {
+              return;
+            }
             if (!Array.from(lignesPourCeCompte).find(lpc => lpc.num === l.numeroAcces)) {
               lignesPourCeCompte.add({ num: l.numeroAcces, type: l.type });
             }
@@ -691,9 +761,18 @@ export async function importCSV(
         // Facture doublon ou erreur, déjà traitée
         continue;
       }
+      // Si la facture existait avant cet import, ne pas recréer les lignes-factures pour éviter les doublons
+      if (!facturesCreees.has(factureKey)) {
+        continue;
+      }
 
       // Pour chaque ligne de cette facture, crée l'entrée lignes_factures
       for (const ligneData of factureData.lignes) {
+        // Les lignes sans numéro d'accès n'ont pas de création de ligne_facture
+        if (!ligneData.numeroAcces) {
+          continue;
+        }
+
         const ligne = lignesGlobalMap.get(ligneData.numeroAcces);
 
         if (!ligne) {

@@ -52,7 +52,7 @@ export default function ImportPage({ entrepriseId, onBack }: ImportPageProps) {
     }
   }
 
-  async function proceedWithImport(comptesSelectionnes: Set<string>) {
+  async function proceedWithImport(comptesSelectionnes: Set<string>, comptesMisesAJour?: CompteACreer[]) {
     if (!selectedFile) return;
 
     setShowCompteModal(false);
@@ -65,6 +65,7 @@ export default function ImportPage({ entrepriseId, onBack }: ImportPageProps) {
         selectedFile,
         entrepriseId,
         comptesSelectionnes,
+        comptesMisesAJour,
         (stage: string, percent: number) => {
           setImportProgress({ stage, percent });
         }

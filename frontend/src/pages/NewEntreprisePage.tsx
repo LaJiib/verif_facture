@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getEntreprise, executeQuery, type Entreprise } from "../newApi";
+import { getEntreprise, executeQuery, updateCompte, type Entreprise } from "../newApi";
 import CompteDetailModal from "../components/CompteDetailModal";
 
 interface EntreprisePageProps {
@@ -56,6 +56,11 @@ export default function EntreprisePage({
   const [lotsData, setLotsData] = useState<LotData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [editCompte, setEditCompte] = useState<{
+    compte: CompteData;
+    nom: string;
+    lot: string;
+  } | null>(null);
 
   // Modal de détail
   const [selectedCompte, setSelectedCompte] = useState<DetailModalData | null>(null);
@@ -198,6 +203,41 @@ export default function EntreprisePage({
       compte_nom: compte.compte_nom,
       mois: mois,
     });
+  }
+
+  function openEditCompte(compte: CompteData) {
+    setEditCompte({
+      compte,
+      nom: compte.compte_nom || "",
+      lot: compte.lot || "",
+    });
+  }
+
+  async function handleSaveEdit() {
+    if (!editCompte) return;
+    const trimmedNom = editCompte.nom.trim();
+    const trimmedLot = editCompte.lot.trim();
+    const payload: { nom?: string | null; lot?: string | null } = {};
+
+    if (trimmedNom !== (editCompte.compte.compte_nom || "")) {
+      payload.nom = trimmedNom === "" ? null : trimmedNom;
+    }
+    if (trimmedLot !== (editCompte.compte.lot || "")) {
+      payload.lot = trimmedLot === "" ? null : trimmedLot;
+    }
+
+    if (Object.keys(payload).length === 0) {
+      setEditCompte(null);
+      return;
+    }
+
+    try {
+      await updateCompte(editCompte.compte.compte_id, payload);
+      await loadData();
+      setEditCompte(null);
+    } catch (err) {
+      alert((err as Error).message || "Erreur lors de la mise à jour du compte");
+    }
   }
 
   function getStatutIcon(statut: string): string {
@@ -414,6 +454,8 @@ export default function EntreprisePage({
                         }}
                       >
                         <td
+                          onClick={() => openEditCompte(compte)}
+                          title="Cliquer pour éditer le nom ou le lot"
                           style={{
                             position: "sticky",
                             left: 0,
@@ -421,6 +463,7 @@ export default function EntreprisePage({
                             padding: "0.75rem 0.75rem 0.75rem 2.5rem",
                             borderRight: "1px solid #e5e7eb",
                             borderBottom: compteIdx === lot.comptes.length - 1 ? "2px solid #e5e7eb" : "1px solid #e5e7eb",
+                            cursor: "pointer",
                           }}
                         >
                           <div style={{ fontWeight: "500" }}>
@@ -516,6 +559,114 @@ export default function EntreprisePage({
           mois={selectedCompte.mois}
           onClose={() => setSelectedCompte(null)}
         />
+      )}
+
+      {editCompte && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0, 0, 0, 0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1100,
+          }}
+          onClick={() => setEditCompte(null)}
+        >
+          <div
+            style={{
+              background: "white",
+              borderRadius: "0.75rem",
+              width: "90%",
+              maxWidth: "520px",
+              boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
+              padding: "1.5rem",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <h3 style={{ margin: 0, fontSize: "1.25rem" }}>
+                Éditer le compte {editCompte.compte.compte_num}
+              </h3>
+              <button
+                onClick={() => setEditCompte(null)}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  fontSize: "1.25rem",
+                  cursor: "pointer",
+                  color: "#6b7280",
+                }}
+                aria-label="Fermer"
+              >
+                ×
+              </button>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "1rem", marginTop: "1.25rem" }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: "0.35rem", fontWeight: 600 }}>
+                Nom du compte
+                <input
+                  value={editCompte.nom}
+                  onChange={(e) => setEditCompte({ ...editCompte, nom: e.target.value })}
+                  placeholder="Nom affiché (optionnel)"
+                  style={{
+                    padding: "0.6rem 0.75rem",
+                    borderRadius: "0.5rem",
+                    border: "1px solid #d1d5db",
+                    fontSize: "0.95rem",
+                  }}
+                />
+              </label>
+
+              <label style={{ display: "flex", flexDirection: "column", gap: "0.35rem", fontWeight: 600 }}>
+                Lot
+                <input
+                  value={editCompte.lot}
+                  onChange={(e) => setEditCompte({ ...editCompte, lot: e.target.value })}
+                  placeholder="Lot (optionnel)"
+                  style={{
+                    padding: "0.6rem 0.75rem",
+                    borderRadius: "0.5rem",
+                    border: "1px solid #d1d5db",
+                    fontSize: "0.95rem",
+                  }}
+                />
+              </label>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.75rem", marginTop: "1.5rem" }}>
+              <button
+                onClick={() => setEditCompte(null)}
+                style={{
+                  padding: "0.65rem 1.1rem",
+                  border: "1px solid #d1d5db",
+                  background: "white",
+                  borderRadius: "0.5rem",
+                  cursor: "pointer",
+                  color: "#374151",
+                }}
+              >
+                Annuler
+              </button>
+              <button
+                onClick={handleSaveEdit}
+                style={{
+                  padding: "0.65rem 1.25rem",
+                  border: "none",
+                  background: "#2563eb",
+                  color: "white",
+                  borderRadius: "0.5rem",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                Enregistrer
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

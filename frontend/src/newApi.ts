@@ -28,8 +28,9 @@ export interface Entreprise {
 }
 
 export interface Compte {
-  id: string;  // Numéro d'accès
-  type: string;
+  id: number;
+  num: string;
+  nom: string | null;
   entreprise_id: number;
   lot: string | null;
 }
@@ -98,8 +99,8 @@ export async function fetchComptes(entrepriseId?: number): Promise<Compte[]> {
 }
 
 export async function createCompte(compte: {
-  id: string;
-  type: string;
+  num: string;
+  nom?: string;
   entreprise_id: number;
   lot?: string;
 }): Promise<Compte> {
@@ -117,8 +118,8 @@ export async function getCompte(id: string): Promise<Compte> {
 }
 
 export async function updateCompte(
-  id: string,
-  update: { type?: string; lot?: string }
+  id: number,
+  update: { nom?: string | null; lot?: string | null }
 ): Promise<Compte> {
   const res = await fetch(`${API_BASE_URL}/comptes/${id}`, {
     method: "PUT",
