@@ -1,9 +1,41 @@
+
 import { useEffect, useState } from "react";
 import { fetchLigneRecords, type LigneRecordsResponse } from "../entrepriseApi";
+import { computeVariation } from "../utils/variation";
 
 interface LigneDetailsPageProps {
   ligneId: number;
   onBack: () => void;
+}
+
+function getPreviousMonthKey(mois: string): string | null {
+  const [yearStr, monthStr] = mois.split("-");
+  const year = parseInt(yearStr, 10);
+  const month = parseInt(monthStr, 10);
+  if (Number.isNaN(year) || Number.isNaN(month)) return null;
+
+  let previousMonth = month - 1;
+  let previousYear = year;
+
+  if (previousMonth === 0) {
+    previousMonth = 12;
+    previousYear -= 1;
+  }
+
+  const paddedMonth = previousMonth < 10 ? `0${previousMonth}` : `${previousMonth}`;
+  return `${previousYear}-${paddedMonth}`;
+}
+
+function VariationBadge({ current, previous }: { current: number; previous?: number | null }) {
+  const { direction, label } = computeVariation(current, previous);
+  const arrow = direction === "up" ? "?" : direction === "down" ? "?" : "?";
+
+  return (
+    <span className={`variation-badge ${direction}`}>
+      <span className="variation-arrow">{arrow}</span>
+      <span className="variation-label">{label}</span>
+    </span>
+  );
 }
 
 export default function LigneDetailsPage({ ligneId, onBack }: LigneDetailsPageProps) {
@@ -39,7 +71,7 @@ export default function LigneDetailsPage({ ligneId, onBack }: LigneDetailsPagePr
   if (error) {
     return (
       <div className="app">
-        <button onClick={onBack}>← Retour</button>
+        <button onClick={onBack}>? Retour</button>
         <div className="alert error">{error}</div>
       </div>
     );
@@ -49,19 +81,20 @@ export default function LigneDetailsPage({ ligneId, onBack }: LigneDetailsPagePr
 
   const totalHT = data.records.reduce((sum, r) => sum + r.total_ht, 0);
   const totalTTC = data.records.reduce((sum, r) => sum + r.total_ttc, 0);
+  const recordByMonth = new Map(data.records.map((record) => [record.mois, record]));
 
   return (
     <div className="app">
       <header>
         <button onClick={onBack} className="back-button">
-          ← Retour
+          ? Retour
         </button>
         <div>
-          <p className="eyebrow">Ligne télécom</p>
+          <p className="eyebrow">Ligne t?l?com</p>
           <h1>{data.ligne.nom || data.ligne.numero_acces}</h1>
           <div className="ligne-details">
             <span className="badge">{data.ligne.type_ligne}</span>
-            <span className="muted">Numéro d'accès: {data.ligne.numero_acces}</span>
+            <span className="muted">Num?ro d'acc?s: {data.ligne.numero_acces}</span>
             {data.ligne.adresse && (
               <span className="muted">Adresse: {data.ligne.adresse}</span>
             )}
@@ -122,11 +155,61 @@ export default function LigneDetailsPage({ ligneId, onBack }: LigneDetailsPagePr
                   <td>{record.mois}</td>
                   <td>{record.numero_facture}</td>
                   <td>{record.numero_compte}</td>
-                  <td>{record.abo.toFixed(2)} €</td>
-                  <td>{record.conso.toFixed(2)} €</td>
-                  <td>{record.remise.toFixed(2)} €</td>
-                  <td>{record.total_ht.toFixed(2)} €</td>
-                  <td>{record.total_ttc.toFixed(2)} €</td>
+                  {(() => {
+                    const previousKey = getPreviousMonthKey(record.mois);
+                    const previous = previousKey
+                      ? recordByMonth.get(previousKey)
+                      : undefined;
+                    return (
+                      <>
+                        <td>
+                          <div className="value-with-variation">
+                            <span>{record.abo.toFixed(2)} ?</span>
+                            <VariationBadge
+                              current={record.abo}
+                              previous={previous?.abo}
+                            />
+                          </div>
+                        </td>
+                        <td>
+                          <div className="value-with-variation">
+                            <span>{record.conso.toFixed(2)} ?</span>
+                            <VariationBadge
+                              current={record.conso}
+                              previous={previous?.conso}
+                            />
+                          </div>
+                        </td>
+                        <td>
+                          <div className="value-with-variation">
+                            <span>{record.remise.toFixed(2)} ?</span>
+                            <VariationBadge
+                              current={record.remise}
+                              previous={previous?.remise}
+                            />
+                          </div>
+                        </td>
+                        <td>
+                          <div className="value-with-variation">
+                            <span>{record.total_ht.toFixed(2)} ?</span>
+                            <VariationBadge
+                              current={record.total_ht}
+                              previous={previous?.total_ht}
+                            />
+                          </div>
+                        </td>
+                        <td>
+                          <div className="value-with-variation">
+                            <span>{record.total_ttc.toFixed(2)} ?</span>
+                            <VariationBadge
+                              current={record.total_ttc}
+                              previous={previous?.total_ttc}
+                            />
+                          </div>
+                        </td>
+                      </>
+                    );
+                  })()}
                   <td>{record.statut}</td>
                 </tr>
               ))}

@@ -496,6 +496,41 @@ input[type="file"] {
   color: #0f172a;
 }
 
+.value-with-variation {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.variation-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.variation-badge .variation-arrow {
+  font-size: 0.85rem;
+}
+
+.variation-badge.up {
+  background: #ecfdf3;
+  color: #15803d;
+}
+
+.variation-badge.down {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.variation-badge.neutral {
+  background: #f1f5f9;
+  color: #475569;
+}
+
 /* Type row expansion */
 .type-name {
   display: flex;
@@ -522,6 +557,100 @@ input[type="file"] {
   font-size: 1.125rem;
   font-weight: 600;
   color: #0f172a;
+}
+
+/* Modal layout */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-container {
+  background: #fff;
+  border-radius: 0.5rem;
+  width: 90%;
+  max-width: 900px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+}
+
+.modal-header {
+  padding: 1.5rem;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.modal-title {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.modal-subtitle {
+  margin: 0.25rem 0 0 0;
+  color: #6b7280;
+  font-size: 0.875rem;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: #6b7280;
+  padding: 0.5rem;
+}
+
+.modal-tabs {
+  display: flex;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f9fafb;
+}
+
+.modal-tab {
+  padding: 1rem 1.5rem;
+  border: none;
+  background: transparent;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  color: #6b7280;
+}
+
+.modal-tab.active {
+  background: #fff;
+  border-bottom: 2px solid #3b82f6;
+  font-weight: 600;
+  color: #3b82f6;
+}
+
+.modal-content {
+  padding: 1.5rem;
+  overflow: auto;
+  flex: 1;
+}
+
+.modal-footer {
+  padding: 1rem 1.5rem;
+  border-top: 1px solid #e5e7eb;
+  text-align: right;
+}
+
+.btn-primary {
+  padding: 0.5rem 1.5rem;
+  background: #3b82f6;
+  color: #fff;
+  border: none;
+  border-radius: 0.25rem;
+  cursor: pointer;
+  font-size: 1rem;
 }
 
 .summary-stats {

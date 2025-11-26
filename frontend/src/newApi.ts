@@ -210,3 +210,16 @@ export async function executeQuery(sql: string): Promise<{ data: any[]; count: n
   });
   return handleResponse<{ data: any[]; count: number }>(res);
 }
+
+// ============================================================================
+// API CALL - LIGNES
+// ============================================================================
+
+export async function updateLigneType(id: number, type: string): Promise<void> {
+  const res = await fetch(`${API_BASE_URL}/lignes/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type }),
+  });
+  await handleResponse<{ message: string }>(res);
+}

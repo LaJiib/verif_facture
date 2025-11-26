@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import { getEntreprise, executeQuery, updateCompte, type Entreprise } from "../newApi";
+import {
+  getEntreprise,
+  executeQuery,
+  updateCompte,
+  fetchFactures,
+  deleteFacture,
+  type Entreprise,
+} from "../newApi";
 import CompteDetailModal from "../components/CompteDetailModal";
 
 interface EntreprisePageProps {
@@ -64,6 +71,7 @@ export default function EntreprisePage({
 
   // Modal de détail
   const [selectedCompte, setSelectedCompte] = useState<DetailModalData | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -203,6 +211,75 @@ export default function EntreprisePage({
       compte_nom: compte.compte_nom,
       mois: mois,
     });
+  }
+
+  function getCompteMonths(compteId: number): string[] {
+    return moisData
+      .map((m) => m.date_key)
+      .filter((dateKey) =>
+        lotsData.some((lot) =>
+          lot.comptes.some(
+            (c) => c.compte_id === compteId && (c.montants_par_mois.get(dateKey) || 0) > 0
+          )
+        )
+      );
+  }
+
+  async function deleteCompteMonth(compteId: number, moisKey: string) {
+    if (isDeleting) return;
+    if (
+      !confirm(
+        `Supprimer toutes les données du compte ${compteId} pour le mois ${moisKey} ? Cette action est irréversible.`
+      )
+    ) {
+      return;
+    }
+    setIsDeleting(true);
+    try {
+      // bornes de mois
+      const [year, month] = moisKey.split("-");
+      const start = `${year}-${month}-01`;
+      const nextMonth = month === "12" ? "01" : String(Number(month) + 1).padStart(2, "0");
+      const nextYear = month === "12" ? String(Number(year) + 1) : year;
+      const endExclusive = `${nextYear}-${nextMonth}-01`;
+
+      const factures = await fetchFactures({
+        compte_id: compteId.toString(),
+        date_debut: start,
+        date_fin: endExclusive,
+      });
+
+      await Promise.all(factures.map((f) => deleteFacture(f.id)));
+      await loadData();
+      setSelectedCompte(null);
+    } catch (err) {
+      alert((err as Error).message || "Erreur lors de la suppression");
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
+  async function deleteCompteAll(compteId: number) {
+    if (isDeleting) return;
+    if (
+      !confirm(
+        `Supprimer toutes les données du compte ${compteId} (tous les mois) ? Cette action est irréversible.`
+      )
+    ) {
+      return;
+    }
+    setIsDeleting(true);
+    try {
+      const factures = await fetchFactures({ compte_id: compteId.toString() });
+      await Promise.all(factures.map((f) => deleteFacture(f.id)));
+      await loadData();
+      setSelectedCompte(null);
+      setEditCompte(null);
+    } catch (err) {
+      alert((err as Error).message || "Erreur lors de la suppression");
+    } finally {
+      setIsDeleting(false);
+    }
   }
 
   function openEditCompte(compte: CompteData) {
@@ -551,15 +628,39 @@ export default function EntreprisePage({
         </p>
       </section>
 
-      {selectedCompte && (
-        <CompteDetailModal
-          compteId={selectedCompte.compte_id}
-          compteNum={selectedCompte.compte_num}
-          compteNom={selectedCompte.compte_nom}
-          mois={selectedCompte.mois}
-          onClose={() => setSelectedCompte(null)}
-        />
-      )}
+      {selectedCompte && (() => {
+        const compteMonths = getCompteMonths(selectedCompte.compte_id);
+        const currentIdx = selectedCompte.mois ? compteMonths.indexOf(selectedCompte.mois) : -1;
+        const hasPrev = currentIdx > 0;
+        const hasNext = currentIdx >= 0 && currentIdx < compteMonths.length - 1;
+
+        return (
+          <CompteDetailModal
+            compteId={selectedCompte.compte_id}
+            compteNum={selectedCompte.compte_num}
+            compteNom={selectedCompte.compte_nom}
+            mois={selectedCompte.mois}
+            onClose={() => setSelectedCompte(null)}
+            hasPrevMonth={hasPrev}
+            hasNextMonth={hasNext}
+            onPrevMonth={() => {
+              if (!selectedCompte.mois || !hasPrev) return;
+              const prevKey = compteMonths[currentIdx - 1];
+              setSelectedCompte({ ...selectedCompte, mois: prevKey });
+            }}
+            onNextMonth={() => {
+              if (!selectedCompte.mois || !hasNext) return;
+              const nextKey = compteMonths[currentIdx + 1];
+              setSelectedCompte({ ...selectedCompte, mois: nextKey });
+            }}
+            onDeleteMonth={
+              selectedCompte.mois
+                ? () => deleteCompteMonth(selectedCompte.compte_id, selectedCompte.mois!)
+                : undefined
+            }
+          />
+        );
+      })()}
 
       {editCompte && (
         <div
@@ -622,21 +723,74 @@ export default function EntreprisePage({
 
               <label style={{ display: "flex", flexDirection: "column", gap: "0.35rem", fontWeight: 600 }}>
                 Lot
-                <input
-                  value={editCompte.lot}
-                  onChange={(e) => setEditCompte({ ...editCompte, lot: e.target.value })}
-                  placeholder="Lot (optionnel)"
-                  style={{
-                    padding: "0.6rem 0.75rem",
-                    borderRadius: "0.5rem",
-                    border: "1px solid #d1d5db",
-                    fontSize: "0.95rem",
-                  }}
-                />
+                {(() => {
+                  const lotOptions = Array.from(
+                    new Set(lotsData.map((l) => l.lot).filter((v): v is string => Boolean(v)))
+                  );
+                  const currentLot = editCompte.lot || "";
+                  const isCustom = currentLot !== "" && !lotOptions.includes(currentLot);
+                  return (
+                    <>
+                      <select
+                        value={isCustom ? "__custom__" : currentLot}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (val === "__custom__") {
+                            setEditCompte({ ...editCompte, lot: "" });
+                          } else {
+                            setEditCompte({ ...editCompte, lot: val });
+                          }
+                        }}
+                        style={{
+                          padding: "0.6rem 0.75rem",
+                          borderRadius: "0.5rem",
+                          border: "1px solid #d1d5db",
+                          fontSize: "0.95rem",
+                          background: "white",
+                        }}
+                      >
+                        {lotOptions.map((lot) => (
+                          <option key={lot} value={lot}>
+                            {lot}
+                          </option>
+                        ))}
+                        <option value="__custom__">Autre (saisir)</option>
+                      </select>
+                      {(isCustom || currentLot === "") && (
+                        <input
+                          value={currentLot}
+                          onChange={(e) => setEditCompte({ ...editCompte, lot: e.target.value })}
+                          placeholder="Nouveau lot"
+                          style={{
+                            marginTop: "0.5rem",
+                            padding: "0.6rem 0.75rem",
+                            borderRadius: "0.5rem",
+                            border: "1px solid #d1d5db",
+                            fontSize: "0.95rem",
+                          }}
+                        />
+                      )}
+                    </>
+                  );
+                })()}
               </label>
             </div>
 
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.75rem", marginTop: "1.5rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "0.75rem", marginTop: "1.5rem", alignItems: "center" }}>
+              <button
+                onClick={() => deleteCompteAll(editCompte.compte.compte_id)}
+                style={{
+                  padding: "0.65rem 1rem",
+                  border: "1px solid #ef4444",
+                  background: "#fee2e2",
+                  color: "#b91c1c",
+                  borderRadius: "0.5rem",
+                  cursor: "pointer",
+                  fontWeight: 700,
+                }}
+              >
+                Supprimer
+              </button>
               <button
                 onClick={() => setEditCompte(null)}
                 style={{
