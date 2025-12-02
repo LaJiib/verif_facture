@@ -1,6 +1,6 @@
-
 import { useEffect, useState } from "react";
 import { fetchLigneRecords, type LigneRecordsResponse } from "../entrepriseApi";
+import { decodeLineType } from "../utils/codecs";
 import { computeVariation } from "../utils/variation";
 
 interface LigneDetailsPageProps {
@@ -93,7 +93,7 @@ export default function LigneDetailsPage({ ligneId, onBack }: LigneDetailsPagePr
           <p className="eyebrow">Ligne t?l?com</p>
           <h1>{data.ligne.nom || data.ligne.numero_acces}</h1>
           <div className="ligne-details">
-            <span className="badge">{data.ligne.type_ligne}</span>
+            <span className="badge">{decodeLineType(Number(data.ligne.type_ligne))}</span>
             <span className="muted">Num?ro d'acc?s: {data.ligne.numero_acces}</span>
             {data.ligne.adresse && (
               <span className="muted">Adresse: {data.ligne.adresse}</span>

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hashlib
 from pathlib import Path
 from time import perf_counter
 from typing import Dict, List, Optional
@@ -39,6 +40,7 @@ from invoice_saver import save_aggregated_invoices
 from models import Entreprise, Ligne, Record
 from sqlalchemy import select, func
 from datetime import datetime
+from storage import StorageError, store_csv_file, list_uploads, delete_upload, delete_uploads_for_entreprise
 
 SAMPLES_DIR = Path("data/csv_examples")
 
@@ -172,6 +174,12 @@ async def aggregate_from_upload(file: UploadFile = File(...), filters: Optional[
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=400, detail="Filtre JSON invalide.") from exc
     filters_clean = _clean_filters(parsed_filters)
+    _persist_uploaded_csv(
+        content=content,
+        original_name=file.filename or "upload.csv",
+        category="aggregate_upload",
+        extra_metadata={"filters": filters_clean} if filters_clean else None,
+    )
     aggregated = (
         processor.aggregate_by_account_filtered(**filters_clean)
         if filters_clean
@@ -218,6 +226,65 @@ def _clean_filters(raw: Dict) -> Dict:
     return {k: v for k, v in raw.items() if v is not None and k in TelecomInvoiceProcessor.FILTER_FIELDS}
 
 
+def _build_facture_signature(aggregated: Dict[str, Dict]) -> Dict[str, Any]:
+    """
+    Build a logical signature of the CSV content based on factures and dates.
+    Avoids extra SQL queries; relies only on the aggregated processor data.
+    """
+    facture_keys: List[str] = []
+    total_detail_lines = 0
+    date_values: List[str] = []
+    for compte, data in aggregated.items():
+        for numero_facture, invoice in data.get("factures", {}).items():
+            dt = getattr(invoice, "date", None)
+            date_str = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
+            facture_keys.append(f"{numero_facture}|{date_str}|{compte}")
+            total_detail_lines += getattr(invoice, "nb_lignes_detail", 0) or 0
+            if date_str:
+                date_values.append(date_str)
+
+    facture_keys_sorted = sorted(facture_keys)
+    signature_text = ";".join(facture_keys_sorted)
+    logical_hash = hashlib.sha256(signature_text.encode("utf-8")).hexdigest() if facture_keys_sorted else None
+    date_min = min(date_values) if date_values else None
+    date_max = max(date_values) if date_values else None
+
+    return {
+        "logical_hash": logical_hash,
+        "factures_count": len(facture_keys_sorted),
+        "facture_keys": facture_keys_sorted,
+        "total_detail_lines": total_detail_lines,
+        "date_min": date_min,
+        "date_max": date_max,
+    }
+def _persist_uploaded_csv(
+    content: bytes,
+    original_name: str,
+    category: str,
+    entreprise: Optional[str] = None,
+    extra_metadata: Optional[Dict[str, Any]] = None,
+    logical_hash: Optional[str] = None,
+):
+    """
+    Keep a copy of the uploaded CSV without impacting the existing flow.
+    Failures are logged but do not stop the request handling.
+    """
+    try:
+        return store_csv_file(
+            content=content,
+            original_name=original_name or "upload.csv",
+            category=category,
+            entreprise=entreprise,
+            extra_metadata=extra_metadata,
+            logical_hash=logical_hash,
+        )
+    except StorageError as exc:
+        logger.warning("CSV non sauvegardé (%s): %s", category, exc)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("CSV non sauvegardé (%s): %s", category, exc)
+    return None
+
+
 @app.post("/lines/sample")
 async def lines_from_sample(request: SampleLineRequest):
     target = SAMPLES_DIR / request.filename
@@ -254,6 +321,12 @@ async def lines_from_upload(
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=400, detail="Filtre JSON invalide.") from exc
     filters_clean = _clean_filters(parsed_filters)
+    _persist_uploaded_csv(
+        content=content,
+        original_name=file.filename or "upload.csv",
+        category="lines_upload",
+        extra_metadata={"filters": filters_clean} if filters_clean else None,
+    )
     response = _filter_lines(processor, filters_clean)
     elapsed = perf_counter() - start
     logger.info("Filtrage lignes upload terminé en %.2fs (total=%d)", elapsed, response["summary"]["total_lignes"])
@@ -296,6 +369,19 @@ async def save_from_upload(
     processor = TelecomInvoiceProcessor()
     processor.load_csv_content(content, silent=True)
     aggregated = processor.aggregate_by_account()
+    signature = _build_facture_signature(aggregated)
+    _persist_uploaded_csv(
+        content=content,
+        original_name=file.filename or "upload.csv",
+        category="save_upload",
+        entreprise=entreprise_name,
+        extra_metadata={
+            "total_comptes": len(aggregated),
+            "total_factures": sum(len(v["factures"]) for v in aggregated.values()),
+            "signature": signature,
+        },
+        logical_hash=signature.get("logical_hash"),
+    )
 
     # Sauvegarder en base
     try:
@@ -413,6 +499,61 @@ async def list_entreprises(db: Session = Depends(get_db)):
     return {"entreprises": result}
 
 
+@app.get("/entreprises/{entreprise_id}/uploads")
+async def list_entreprise_uploads(
+    entreprise_id: int,
+    category: Optional[str] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    """
+    Liste les CSV stockés pour une entreprise donnée (tri décroissant).
+
+    Args:
+        entreprise_id: ID de l'entreprise
+        category: Filtre optionnel (aggregate_upload, lines_upload, save_upload)
+        limit: Nombre maximum d'éléments à retourner (défaut 100)
+    """
+    entreprise = db.execute(
+        select(Entreprise).where(Entreprise.id == entreprise_id)
+    ).scalar_one_or_none()
+    if not entreprise:
+        raise HTTPException(status_code=404, detail="Entreprise non trouvée")
+
+    uploads = list_uploads(entreprise=entreprise.nom, category=category, limit=limit)
+
+    def _fmt(meta: Dict[str, Any]) -> Dict[str, Any]:
+        uploaded_at = meta.get("uploaded_at")
+        month = None
+        try:
+            if uploaded_at:
+                dt = datetime.fromisoformat(uploaded_at.replace("Z", ""))
+                month = dt.strftime("%Y-%m")
+        except Exception:  # pragma: no cover - defensive
+            month = None
+
+        return {
+            "upload_id": meta.get("upload_id"),
+            "original_name": meta.get("original_name"),
+            "category": meta.get("category"),
+            "uploaded_at": uploaded_at,
+            "uploaded_month": month,
+            "size": meta.get("size"),
+            "relative_path": meta.get("relative_path"),
+            "saved_as": meta.get("saved_as"),
+        }
+
+    return {"entreprise": {"id": entreprise.id, "nom": entreprise.nom}, "uploads": [_fmt(u) for u in uploads]}
+
+
+@app.delete("/uploads/{upload_id}")
+async def remove_upload(upload_id: str):
+    """Supprime un CSV stocké (fichier + métadonnée)."""
+    if not delete_upload(upload_id):
+        raise HTTPException(status_code=404, detail="Upload non trouvé")
+    return {"message": "Upload supprimé", "upload_id": upload_id}
+
+
 @app.post("/entreprises")
 async def create_entreprise(nom: str = Form(...), db: Session = Depends(get_db)):
     """
@@ -445,6 +586,28 @@ async def create_entreprise(nom: str = Form(...), db: Session = Depends(get_db))
         "nb_lignes": 0,
         "nb_records": 0
     }
+
+
+@app.delete("/entreprises/{entreprise_id}")
+async def delete_entreprise_endpoint(entreprise_id: int, db: Session = Depends(get_db)):
+    """
+    Supprime une entreprise (avec cascade DB) et les CSV associés.
+    """
+    entreprise = db.execute(
+        select(Entreprise).where(Entreprise.id == entreprise_id)
+    ).scalar_one_or_none()
+
+    if not entreprise:
+        raise HTTPException(status_code=404, detail="Entreprise non trouvée")
+
+    uploads_deleted = delete_uploads_for_entreprise(entreprise.nom)
+
+    db.delete(entreprise)
+    db.commit()
+
+    logger.info("Entreprise supprimée: %s (uploads supprimés: %d)", entreprise.nom, uploads_deleted)
+
+    return {"message": "Entreprise supprimée", "uploads_deleted": uploads_deleted}
 
 
 @app.get("/entreprises/{entreprise_id}/aggregation")

@@ -4,7 +4,9 @@ import HomePage from "./pages/NewHomePage2";
 import EntreprisePage from "./pages/NewEntreprisePage";
 import ImportPage from "./pages/NewImportPage";
 import CreateEntreprisePage from "./pages/CreateEntreprisePage";
+import CsvFormatsSettingsPage from "./pages/CsvFormatsSettingsPage";
 import { fetchEntreprises } from "./newApi";
+import { CsvFormatConfig, loadCsvFormats, upsertCsvFormat } from "./utils/csvFormats";
 
 type Route =
   | { page: "home" }
@@ -17,10 +19,12 @@ export default function App() {
   const [route, setRoute] = useState<Route>({ page: "home" });
   const [currentEntrepriseId, setCurrentEntrepriseId] = useState<number | null>(null);
   const [entreprises, setEntreprises] = useState<Array<{ id: number; nom: string }>>([]);
+  const [csvFormats, setCsvFormats] = useState<CsvFormatConfig[]>([]);
 
   // Charger les entreprises au démarrage
   useEffect(() => {
     loadEntreprises();
+    setCsvFormats(loadCsvFormats());
   }, []);
 
   async function loadEntreprises() {
@@ -60,6 +64,11 @@ export default function App() {
   function handleSelectEntreprise(entrepriseId: number) {
     setCurrentEntrepriseId(entrepriseId);
     setRoute({ page: "home" });
+  }
+
+  function handleSaveCsvFormat(format: CsvFormatConfig) {
+    const updated = upsertCsvFormat(format, csvFormats);
+    setCsvFormats(updated);
   }
 
   // Si aucune entreprise n'est sélectionnée
@@ -126,16 +135,17 @@ export default function App() {
         {route.page === "import" && currentEntrepriseId && (
           <ImportPage
             entrepriseId={currentEntrepriseId}
+            csvFormats={csvFormats}
             onBack={navigateToHome}
           />
         )}
 
         {route.page === "settings" && (
-          <div style={{ padding: "2rem" }}>
-            <h1>Paramètres</h1>
-            <p>Page de configuration des formats CSV (à venir)</p>
-            <button onClick={navigateToHome}>Retour</button>
-          </div>
+          <CsvFormatsSettingsPage
+            formats={csvFormats}
+            onSaveFormat={handleSaveCsvFormat}
+            onBack={navigateToHome}
+          />
         )}
 
         {route.page === "create-entreprise" && (

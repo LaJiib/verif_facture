@@ -1,15 +1,18 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { analyzeCSV, importCSV, type ImportResult, type CompteACreer } from "../csvImporter";
+import { CsvFormatConfig, DEFAULT_CSV_FORMAT } from "../utils/csvFormats";
 import CompteConfirmationModal from "../components/CompteConfirmationModal";
 
 interface ImportPageProps {
   entrepriseId: number;
+  csvFormats: CsvFormatConfig[];
   onBack: () => void;
 }
 
-export default function ImportPage({ entrepriseId, onBack }: ImportPageProps) {
+export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportPageProps) {
+  const availableFormats = csvFormats.length ? csvFormats : [DEFAULT_CSV_FORMAT];
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [csvFormat, setCsvFormat] = useState<string>("orange");
+  const [csvFormat, setCsvFormat] = useState<string>(availableFormats[0]?.id || DEFAULT_CSV_FORMAT.id);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
@@ -23,6 +26,14 @@ export default function ImportPage({ entrepriseId, onBack }: ImportPageProps) {
     stage: string;
     percent: number;
   } | null>(null);
+  const activeFormat = availableFormats.find((format) => format.id === csvFormat) || availableFormats[0] || DEFAULT_CSV_FORMAT;
+
+  useEffect(() => {
+    const formats = csvFormats.length ? csvFormats : [DEFAULT_CSV_FORMAT];
+    if (!formats.find((format) => format.id === csvFormat)) {
+      setCsvFormat(formats[0]?.id || DEFAULT_CSV_FORMAT.id);
+    }
+  }, [csvFormats, csvFormat]);
 
   async function handleAnalyze() {
     if (!selectedFile) {
@@ -35,7 +46,7 @@ export default function ImportPage({ entrepriseId, onBack }: ImportPageProps) {
     setImportResult(null);
 
     try {
-      const { comptesACreer } = await analyzeCSV(selectedFile, entrepriseId);
+      const { comptesACreer } = await analyzeCSV(selectedFile, entrepriseId, activeFormat);
 
       if (comptesACreer.length > 0) {
         // Il y a des comptes à créer, afficher la modale
@@ -64,6 +75,7 @@ export default function ImportPage({ entrepriseId, onBack }: ImportPageProps) {
       const result = await importCSV(
         selectedFile,
         entrepriseId,
+        activeFormat,
         comptesSelectionnes,
         comptesMisesAJour,
         (stage: string, percent: number) => {
@@ -107,11 +119,14 @@ export default function ImportPage({ entrepriseId, onBack }: ImportPageProps) {
             value={csvFormat}
             onChange={(e) => setCsvFormat(e.target.value)}
           >
-            <option value="orange">Format Orange (par défaut)</option>
-            <option value="custom" disabled>Format personnalisé (à configurer)</option>
+            {csvFormats.map((format) => (
+              <option key={format.id} value={format.id}>
+                {format.name}
+              </option>
+            ))}
           </select>
           <p style={{ fontSize: "0.875rem", color: "#6b7280", marginTop: "0.5rem" }}>
-            Le format Orange attend les colonnes: Numéro compte, Numéro accès, Numéro facture, Date, etc.
+            Colonnes attendues: {Object.values(activeFormat.columns).filter(Boolean).join(", ")}
           </p>
         </div>
       </section>

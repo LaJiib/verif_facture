@@ -1,3 +1,4 @@
+import React from "react";
 import { useEffect, useState } from "react";
 import {
   getEntreprise,
@@ -7,6 +8,9 @@ import {
   deleteFacture,
   type Entreprise,
 } from "../newApi";
+import { decodeFactureStatus } from "../utils/codecs";
+import { exportLotRecapPdf } from "../utils/pdfReport";
+import { StatusBar } from "../utils/statusBar";
 import CompteDetailModal from "../components/CompteDetailModal";
 
 interface EntreprisePageProps {
@@ -20,8 +24,9 @@ interface MoisData {
 }
 
 interface FactureInfo {
+  facture_id: number;
   num: string;
-  statut: string;
+  statut: number;
 }
 
 interface CompteData {
@@ -31,6 +36,7 @@ interface CompteData {
   lot: string;
   montants_par_mois: Map<string, number>; // date_key -> total_ht
   factures_par_mois: Map<string, FactureInfo[]>; // date_key -> liste des factures
+  montants_detail_par_mois: Map<string, { abo: number; conso: number; remises: number; achat: number }>;
 }
 
 interface DetailModalData {
@@ -40,17 +46,11 @@ interface DetailModalData {
   mois?: string; // Si fourni, filtre sur ce mois
 }
 
-interface StatutStats {
-  importé: number;
-  validé: number;
-  contesté: number;
-}
-
 interface LotData {
   lot: string;
   expanded: boolean;
   total_par_mois: Map<string, number>;
-  statuts_par_mois: Map<string, StatutStats>; // Statistiques de statut par mois
+  statuts_par_mois: Map<string, Record<number, number>>; // Statistiques de statut par mois
   comptes: CompteData[];
 }
 
@@ -68,6 +68,7 @@ export default function EntreprisePage({
     nom: string;
     lot: string;
   } | null>(null);
+  const [exportLot, setExportLot] = useState<{ lot: string; months: Set<string> } | null>(null);
 
   // Modal de détail
   const [selectedCompte, setSelectedCompte] = useState<DetailModalData | null>(null);
@@ -77,10 +78,14 @@ export default function EntreprisePage({
     loadData();
   }, [entrepriseId]);
 
-  async function loadData() {
+  async function loadData(preserveExpanded: boolean = false) {
     setIsLoading(true);
     setError(null);
     try {
+      const expandedLots = preserveExpanded
+        ? new Set(lotsData.filter((l) => l.expanded).map((l) => l.lot))
+        : new Set<string>();
+
       const entrepriseData = await getEntreprise(entrepriseId);
       setEntreprise(entrepriseData);
 
@@ -88,12 +93,17 @@ export default function EntreprisePage({
       const query = `
         SELECT
           strftime('%Y-%m', f.date) as date_key,
+          f.id as facture_id,
           c.id as compte_id,
           c.num as compte_num,
           c.nom as compte_nom,
           c.lot as lot,
           f.num as facture_num,
           f.statut as facture_statut,
+          f.abo as abo,
+          f.conso as conso,
+          f.remises as remises,
+          f.achat as achat,
           (f.abo + f.conso + f.remises + f.achat) as total_ht
         FROM factures f
         JOIN comptes c ON f.compte_id = c.id
@@ -131,23 +141,36 @@ export default function EntreprisePage({
           compteData = {
             compte_id: row.compte_id,
             compte_num: row.compte_num,
-            compte_nom: row.compte_nom,
-            lot: lot,
-            montants_par_mois: new Map(),
-            factures_par_mois: new Map(),
-          };
-          lotData.comptes.push(compteData);
-        }
+          compte_nom: row.compte_nom,
+          lot: lot,
+          montants_par_mois: new Map(),
+          factures_par_mois: new Map(),
+          montants_detail_par_mois: new Map(),
+        };
+        lotData.comptes.push(compteData);
+      }
 
         // Montants
         const currentCompteTotal = compteData.montants_par_mois.get(dateKey) || 0;
-        compteData.montants_par_mois.set(dateKey, currentCompteTotal + row.total_ht);
+        compteData.montants_par_mois.set(dateKey, currentCompteTotal + (Number(row.total_ht) || 0));
+        const detail = compteData.montants_detail_par_mois.get(dateKey) || {
+          abo: 0,
+          conso: 0,
+          remises: 0,
+          achat: 0,
+        };
+        detail.abo += Number(row.abo) || 0;
+        detail.conso += Number(row.conso) || 0;
+        detail.remises += Number(row.remises) || 0;
+        detail.achat += Number(row.achat) || 0;
+        compteData.montants_detail_par_mois.set(dateKey, detail);
 
         // Factures pour le compte
         if (!compteData.factures_par_mois.has(dateKey)) {
           compteData.factures_par_mois.set(dateKey, []);
         }
         compteData.factures_par_mois.get(dateKey)!.push({
+          facture_id: row.facture_id,
           num: row.facture_num,
           statut: row.facture_statut,
         });
@@ -158,11 +181,11 @@ export default function EntreprisePage({
 
         // Statistiques de statut pour le lot
         if (!lotData.statuts_par_mois.has(dateKey)) {
-          lotData.statuts_par_mois.set(dateKey, { importé: 0, validé: 0, contesté: 0 });
+          lotData.statuts_par_mois.set(dateKey, { 0: 0, 1: 0, 2: 0 });
         }
         const statutStats = lotData.statuts_par_mois.get(dateKey)!;
-        const statut = row.facture_statut as keyof StatutStats;
-        if (statut in statutStats) {
+        const statut = Number(row.facture_statut);
+        if (statut === 0 || statut === 1 || statut === 2) {
           statutStats[statut]++;
         }
       });
@@ -177,13 +200,64 @@ export default function EntreprisePage({
       );
 
       setLotsData(
-        Array.from(lotsMap.values()).sort((a, b) => a.lot.localeCompare(b.lot))
+        Array.from(lotsMap.values())
+          .sort((a, b) => a.lot.localeCompare(b.lot))
+          .map((lot) => ({ ...lot, expanded: expandedLots.has(lot.lot) }))
       );
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setIsLoading(false);
     }
+  }
+
+  // Mise à jour ciblée après validation d'un rapport (évite de reconstruire toute la page)
+  function handleFactureStatusUpdate({
+    factureId,
+    newStatut,
+    mois,
+    compteId,
+  }: {
+    factureId: number;
+    newStatut: number;
+    mois?: string;
+    compteId: number;
+  }) {
+    setLotsData((prevLots) =>
+      prevLots.map((lot) => {
+        const comptes = lot.comptes.map((compte) => {
+          if (compte.compte_id !== compteId) return compte;
+          const facturesMap = new Map(compte.factures_par_mois);
+          const statutsMap = new Map(lot.statuts_par_mois);
+
+          if (mois) {
+            const factures = facturesMap.get(mois) || [];
+            let oldStatut: number | null = null;
+            const updatedFactures = factures.map((f) => {
+              if (f.facture_id === factureId) {
+                oldStatut = f.statut;
+                return { ...f, statut: newStatut };
+              }
+              return f;
+            });
+            facturesMap.set(mois, updatedFactures);
+
+            if (oldStatut !== null) {
+              const stats = { ...(statutsMap.get(mois) || { 0: 0, 1: 0, 2: 0 }) };
+              stats[oldStatut] = Math.max(0, (stats[oldStatut] || 0) - 1);
+              stats[newStatut] = (stats[newStatut] || 0) + 1;
+              statutsMap.set(mois, stats);
+            }
+          }
+
+          return {
+            ...compte,
+            factures_par_mois: facturesMap,
+          };
+        });
+        return { ...lot, comptes: comptes };
+      })
+    );
   }
 
   function formatMois(dateKey: string): string {
@@ -202,6 +276,59 @@ export default function EntreprisePage({
         lot.lot === lotName ? { ...lot, expanded: !lot.expanded } : lot
       )
     );
+  }
+
+  function openExportLot(lotName: string) {
+    setExportLot({
+      lot: lotName,
+      months: new Set(moisData.map((m) => m.date_key)),
+    });
+  }
+
+  function toggleExportMonth(month: string) {
+    setExportLot((prev) => {
+      if (!prev) return prev;
+      const next = new Set(prev.months);
+      if (next.has(month)) next.delete(month);
+      else next.add(month);
+      return { ...prev, months: next };
+    });
+  }
+
+  function confirmExportLot() {
+    if (!exportLot) return;
+    const lotData = lotsData.find((l) => l.lot === exportLot.lot);
+    if (!lotData) return;
+    const months = Array.from(exportLot.months).sort();
+    const comptes = lotData.comptes.map((c) => {
+      const moisDetails = months.map((m) => {
+        const detail = c.montants_detail_par_mois.get(m) || {
+          abo: 0,
+          conso: 0,
+          remises: 0,
+          achat: 0,
+        };
+        const factures = c.factures_par_mois.get(m) || [];
+        const total = detail.abo + detail.conso + detail.remises + detail.achat;
+        return {
+          mois: m,
+          abo: detail.abo,
+          conso: detail.conso,
+          remises: detail.remises,
+          achat: detail.achat,
+          total,
+          factures,
+        };
+      });
+      return { compte_num: c.compte_num, compte_nom: c.compte_nom, moisDetails };
+    });
+    exportLotRecapPdf({
+      entrepriseNom: entreprise?.nom,
+      lotNom: lotData.lot,
+      moisSelectionnes: months,
+      comptes,
+    });
+    setExportLot(null);
   }
 
   function handleCompteClick(compte: CompteData, mois?: string) {
@@ -317,46 +444,47 @@ export default function EntreprisePage({
     }
   }
 
-  function getStatutIcon(statut: string): string {
+  function getStatutIcon(statut: number): string {
     switch (statut) {
-      case "validé":
+      case 1:
         return "✓";
-      case "contesté":
+      case 2:
         return "!";
-      case "importé":
+      case 0:
       default:
         return "○";
     }
   }
 
-  function getStatutColor(statut: string): string {
+  function getStatutColor(statut: number): string {
     switch (statut) {
-      case "validé":
+      case 1:
         return "#10b981"; // Vert
-      case "contesté":
+      case 2:
         return "#f59e0b"; // Orange
-      case "importé":
+      case 0:
       default:
         return "#9ca3af"; // Gris
     }
   }
 
-  function formatStatutPercentage(stats: StatutStats): string {
-    const total = stats.importé + stats.validé + stats.contesté;
+  function formatStatutPercentage(stats: Record<number, number>): string {
+    const total = (stats[0] || 0) + (stats[1] || 0) + (stats[2] || 0);
     if (total === 0) return "";
 
     const parts: string[] = [];
-    if (stats.validé > 0) {
-      parts.push(`${Math.round((stats.validé / total) * 100)}% ✓`);
+    if (stats[1]) {
+      parts.push(`${Math.round((stats[1] / total) * 100)}% valide`);
     }
-    if (stats.contesté > 0) {
-      parts.push(`${Math.round((stats.contesté / total) * 100)}% !`);
+    if (stats[2]) {
+      parts.push(`${Math.round((stats[2] / total) * 100)}% conteste`);
     }
-    if (stats.importé > 0) {
-      parts.push(`${Math.round((stats.importé / total) * 100)}% ○`);
+    if (stats[0]) {
+      parts.push(`${Math.round((stats[0] / total) * 100)}% importe`);
     }
-    return parts.join(" · ");
+    return parts.join(" | ");
   }
+
 
   if (isLoading) {
     return (
@@ -459,7 +587,7 @@ export default function EntreprisePage({
             </thead>
             <tbody>
               {lotsData.map((lot, lotIdx) => (
-                <>
+                <React.Fragment key={`lot-frag-${lot.lot}`}>
                   {/* Ligne du lot */}
                   <tr
                     key={`lot-${lot.lot}`}
@@ -481,18 +609,38 @@ export default function EntreprisePage({
                         borderBottom: "1px solid #e5e7eb",
                       }}
                     >
-                      <span style={{ marginRight: "0.5rem" }}>
-                        {lot.expanded ? "▼" : "▶"}
-                      </span>
-                      {lot.lot}
-                      <span style={{ marginLeft: "0.5rem", color: "#6b7280", fontWeight: "400" }}>
-                        ({lot.comptes.length} compte{lot.comptes.length > 1 ? "s" : ""})
-                      </span>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                        <span style={{ marginRight: "0.25rem" }}>
+                          {lot.expanded ? "▼" : "▶"}
+                        </span>
+                        <span>
+                          {lot.lot}
+                          <span style={{ marginLeft: "0.5rem", color: "#6b7280", fontWeight: "400" }}>
+                            ({lot.comptes.length} compte{lot.comptes.length > 1 ? "s" : ""})
+                          </span>
+                        </span>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openExportLot(lot.lot);
+                          }}
+                          style={{
+                            padding: "0.25rem 0.5rem",
+                            background: "#f3e8ff",
+                            color: "#6b21a8",
+                            border: "1px solid #e9d5ff",
+                            borderRadius: "0.35rem",
+                            fontSize: "0.8rem",
+                            cursor: "pointer",
+                          }}
+                        >
+                          Export PDF
+                        </button>
+                      </div>
                     </td>
                     {moisData.map((mois) => {
                       const total = lot.total_par_mois.get(mois.date_key) || 0;
                       const statutStats = lot.statuts_par_mois.get(mois.date_key);
-                      const percentage = statutStats ? formatStatutPercentage(statutStats) : "";
 
                       return (
                         <td
@@ -507,9 +655,9 @@ export default function EntreprisePage({
                           {total > 0 ? (
                             <div>
                               <div>{total.toFixed(2)} €</div>
-                              {percentage && (
-                                <div style={{ fontSize: "0.75rem", color: "#6b7280", fontWeight: "400" }}>
-                                  {percentage}
+                              {statutStats && (
+                                <div style={{ marginTop: "0.25rem" }}>
+                                  <StatusBar stats={statutStats} height={8} />
                                 </div>
                               )}
                             </div>
@@ -556,7 +704,7 @@ export default function EntreprisePage({
 
                           return (
                             <td
-                              key={mois.date_key}
+                              key={`${compte.compte_id}-${mois.date_key}`}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 if (total > 0) {
@@ -579,7 +727,7 @@ export default function EntreprisePage({
                                   <div style={{ marginTop: "0.35rem", display: "flex", flexDirection: "column", gap: "0.15rem" }}>
                                     {factures.map((f, idx) => (
                                       <div
-                                        key={idx}
+                                        key={`${compte.compte_id}-${mois.date_key}-${idx}`}
                                         style={{
                                           display: "flex",
                                           alignItems: "center",
@@ -593,7 +741,7 @@ export default function EntreprisePage({
                                             marginRight: "0.35rem",
                                             fontWeight: "600",
                                           }}
-                                          title={`Facture ${f.num} - ${f.statut}`}
+                                          title={`Facture ${f.num} - ${decodeFactureStatus(f.statut)}`}
                                         >
                                           {getStatutIcon(f.statut)}
                                         </span>
@@ -612,7 +760,7 @@ export default function EntreprisePage({
                         })}
                       </tr>
                     ))}
-                </>
+                </React.Fragment>
               ))}
             </tbody>
           </table>
@@ -639,8 +787,10 @@ export default function EntreprisePage({
             compteId={selectedCompte.compte_id}
             compteNum={selectedCompte.compte_num}
             compteNom={selectedCompte.compte_nom}
+            entrepriseNom={entreprise?.nom}
             mois={selectedCompte.mois}
             onClose={() => setSelectedCompte(null)}
+            onRefreshParent={handleFactureStatusUpdate}
             hasPrevMonth={hasPrev}
             hasNextMonth={hasNext}
             onPrevMonth={() => {
@@ -661,6 +811,105 @@ export default function EntreprisePage({
           />
         );
       })()}
+
+      {exportLot && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1090,
+          }}
+          onClick={() => setExportLot(null)}
+        >
+          <div
+            style={{
+              background: "white",
+              borderRadius: "0.75rem",
+              width: "90%",
+              maxWidth: "520px",
+              boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ padding: "1.25rem 1.5rem", borderBottom: "1px solid #e5e7eb" }}>
+              <h3 style={{ margin: 0, fontSize: "1.15rem", fontWeight: 700 }}>
+                Exporter le lot {exportLot.lot}
+              </h3>
+              <p style={{ margin: "0.35rem 0 0", color: "#6b7280" }}>
+                Sélectionnez les mois à inclure dans le PDF récapitulatif.
+              </p>
+            </div>
+            <div
+              style={{
+                maxHeight: "320px",
+                overflow: "auto",
+                padding: "1rem 1.5rem",
+                display: "grid",
+                gap: "0.35rem",
+              }}
+            >
+              {moisData.map((m) => (
+                <label
+                  key={m.date_key}
+                  style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={exportLot.months.has(m.date_key)}
+                    onChange={() => toggleExportMonth(m.date_key)}
+                  />
+                  <span>
+                    {m.mois} ({m.date_key})
+                  </span>
+                </label>
+              ))}
+              {moisData.length === 0 && <div style={{ color: "#6b7280" }}>Aucun mois disponible.</div>}
+            </div>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "flex-end",
+                gap: "0.5rem",
+                padding: "0.85rem 1.5rem",
+                borderTop: "1px solid #e5e7eb",
+              }}
+            >
+              <button
+                onClick={() => setExportLot(null)}
+                style={{
+                  padding: "0.55rem 1rem",
+                  border: "1px solid #d1d5db",
+                  background: "white",
+                  borderRadius: "0.4rem",
+                  cursor: "pointer",
+                  color: "#374151",
+                }}
+              >
+                Annuler
+              </button>
+              <button
+                onClick={confirmExportLot}
+                disabled={exportLot.months.size === 0}
+                style={{
+                  padding: "0.55rem 1.1rem",
+                  border: "none",
+                  background: exportLot.months.size === 0 ? "#9ca3af" : "#2563eb",
+                  color: "white",
+                  borderRadius: "0.4rem",
+                  cursor: exportLot.months.size === 0 ? "not-allowed" : "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                Exporter
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {editCompte && (
         <div

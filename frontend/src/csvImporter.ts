@@ -8,6 +8,8 @@
  */
 
 import * as Papa from "papaparse";
+import { encodeLineType } from "./utils/codecs";
+import { CsvFormatConfig, DEFAULT_CSV_FORMAT } from "./utils/csvFormats";
 
 // Types API (devront être importés depuis newApi.ts une fois mis à jour)
 interface Compte {
@@ -21,7 +23,7 @@ interface Compte {
 interface Ligne {
   id: number;
   num: string;
-  type: string;
+  type: number;
   compte_id: number;
 }
 
@@ -35,7 +37,7 @@ interface Facture {
   conso: number;
   remises: number;
   achat: number;
-  statut: string;
+  statut: number; // 0=importe,1=valide,2=conteste
   total_ht: number;
 }
 
@@ -51,6 +53,8 @@ interface LigneFacture {
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+
+type DetectedType = { code: number; label: string };
 
 // ============================================================================
 // API HELPERS
@@ -96,7 +100,7 @@ async function getLignes(compteId: number): Promise<Ligne[]> {
 
 async function createLigne(data: {
   num: string;
-  type: string;
+  type: number;
   compte_id: number;
 }): Promise<Ligne> {
   return apiRequest<Ligne>("POST", "/lignes", data);
@@ -115,7 +119,8 @@ async function createFacture(data: {
   conso: number;
   remises: number;
   achat: number;
-  statut?: string;
+  statut?: number; // 0 par défaut
+  csv_id?: string | null;
 }): Promise<Facture> {
   return apiRequest<Facture>("POST", "/factures", data);
 }
@@ -164,67 +169,93 @@ export interface ImportResult {
 // DÉTECTION AUTOMATIQUE DU TYPE DE LIGNE
 // ============================================================================
 
-function detectTypeLigne(typeAcces: string | undefined, libelleDetail: string | undefined): string {
-  if (!typeAcces && !libelleDetail) return "Autre";
+function detectTypeLigne(typeAcces: string | undefined, libelleDetail: string | undefined): DetectedType {
+  if (!typeAcces && !libelleDetail) return { code: 3, label: "Autre" };
 
   const text = `${typeAcces || ""} ${libelleDetail || ""}`.toLowerCase();
+  let label = "Autre";
 
   if (
     text.includes("adsl") ||
     text.includes("rnis") ||
     text.includes("numeris") ||
     text.includes("bas debit") ||
-    text.includes("bas débit")
+    text.includes("bas d?bit")
   ) {
-    return "Internet bas debit";
-  }
-
-  if (
+    label = "Internet bas debit";
+  } else if (
     text.includes("internet") ||
     text.includes("fibre") ||
     text.includes("ftth") ||
     text.includes("sdsl") ||
     text.includes("vdsl")
   ) {
-    return "Internet";
-  }
-
-  if (
+    label = "Internet";
+  } else if (
     text.includes("mobile") ||
     text.includes("gsm") ||
     text.includes("4g") ||
     text.includes("5g") ||
     text.includes("sim")
   ) {
-    return "Mobile";
-  }
-
-  if (
+    label = "Mobile";
+  } else if (
     text.includes("secondaire") ||
     text.includes("terminal") ||
     text.includes("poste supplementaire") ||
-    text.includes("poste supplémentaire")
+    text.includes("poste suppl?mentaire")
   ) {
-    return "Fixe secondaire";
+    label = "Fixe secondaire";
+  } else if (text.includes("ligne") || text.includes("telephon") || text.includes("t?l?phon")) {
+    label = "Fixe";
   }
 
-  if (text.includes("ligne") || text.includes("telephon") || text.includes("téléphon")) {
-    return "Fixe";
-  }
-
-  return "Autre";
+  const code = encodeLineType(label);
+  return { code, label };
 }
-
 // ============================================================================
 // EXTRACTION DES DONNÉES
 // ============================================================================
+
+function getColumnValue(row: CSVRow, columnName?: string): string | undefined {
+  if (!columnName) return undefined;
+  if (row[columnName] !== undefined) return row[columnName];
+  const normalized = columnName.trim().toLowerCase();
+  const matchKey = Object.keys(row).find(key => key.trim().toLowerCase() === normalized);
+  return matchKey ? row[matchKey] : undefined;
+}
+
+function parseDateValue(raw: string | undefined, format: CsvFormatConfig): string | null {
+  if (!raw) return null;
+  const value = raw.trim();
+  if (!value) return null;
+
+  const dateFormat = format.dateFormat || "DD/MM/YYYY";
+  const parts = value.split(/[/-]/);
+  if (parts.length !== 3) {
+    return null;
+  }
+
+  let day = parts[0];
+  let month = parts[1];
+  let year = parts[2];
+
+  if (dateFormat === "YYYY-MM-DD" || value.match(/^\d{4}-\d{2}-\d{2}$/)) {
+    year = parts[0];
+    month = parts[1];
+    day = parts[2];
+  }
+
+  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+}
 
 interface LigneData {
   numeroCompte: string;
   numeroAcces: string | null;
   numeroFacture: string;
   date: string;
-  type: string;
+  typeCode: number;
+  typeLabel: string;
   montantHT: number;
   niveauCharge: string;
   typeCharge: string;
@@ -232,26 +263,27 @@ interface LigneData {
   rubriqueFacture?: string;
 }
 
-function extractLignesData(rows: CSVRow[]): LigneData[] {
+function extractLignesData(rows: CSVRow[], format: CsvFormatConfig): LigneData[] {
   const lignesData: LigneData[] = [];
   let skippedRows = 0;
 
   for (const row of rows) {
-    const numeroCompte = row["Numéro compte"]?.trim();
-    const numeroAcces = row["Numéro accès"]?.trim() || null;
-    const numeroFacture = row["Numéro facture"]?.trim();
-    const dateStr = row["Date"]?.trim();
-    const typeAcces = row["Type d'accès"]?.trim();
-    const libelleDetail = row["Libellé ligne facture"]?.trim();
-    const rubriqueFacture = row["Rubrique facture"]?.trim();
-    const montantHT = parseFloat(row["Montant (€ HT)"]?.replace(",", ".") || "0");
-    const niveauCharge = row["Niveau de charge"]?.trim()?.toLowerCase() || "";
-    const typeCharge = row["Type de charge"]?.trim()?.toLowerCase() || "";
+    const numeroCompte = getColumnValue(row, format.columns.numeroCompte)?.trim();
+    const numeroAcces = getColumnValue(row, format.columns.numeroAcces)?.trim() || null;
+    const numeroFacture = getColumnValue(row, format.columns.numeroFacture)?.trim();
+    const rawDate = getColumnValue(row, format.columns.date);
+    const dateStr = parseDateValue(rawDate, format);
+    const typeAcces = getColumnValue(row, format.columns.typeAcces)?.trim();
+    const libelleDetail = getColumnValue(row, format.columns.libelleDetail)?.trim();
+    const rubriqueFacture = getColumnValue(row, format.columns.rubriqueFacture)?.trim();
+    const montantHT = parseFloat(getColumnValue(row, format.columns.montantHT)?.replace(',', '.') || '0');
+    const niveauCharge = getColumnValue(row, format.columns.niveauCharge)?.trim()?.toLowerCase() || '';
+    const typeCharge = getColumnValue(row, format.columns.typeCharge)?.trim()?.toLowerCase() || '';
 
     if (!numeroCompte || !numeroFacture || !dateStr) {
       skippedRows++;
       if (skippedRows <= 3) {
-        console.warn(`[CSV Import] ⚠️ Ligne ignorée (manque données):`, {
+        console.warn(`[CSV Import] Ligne ignoree (manque donnees):`, {
           numeroCompte,
           numeroAcces,
           numeroFacture,
@@ -261,26 +293,25 @@ function extractLignesData(rows: CSVRow[]): LigneData[] {
       continue;
     }
 
-    // Convertir la date en format ISO (YYYY-MM-DD)
-    const [day, month, year] = dateStr.split("/");
-    const dateISO = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+    const detectedType = detectTypeLigne(typeAcces, libelleDetail);
 
     lignesData.push({
       numeroCompte,
       numeroAcces,
       numeroFacture,
-      date: dateISO,
-      type: detectTypeLigne(typeAcces, libelleDetail),
+      date: dateStr,
+      typeCode: detectedType.code,
+      typeLabel: detectedType.label,
       montantHT,
       niveauCharge,
       typeCharge,
-      libelleDetail: libelleDetail || "",
+      libelleDetail: libelleDetail || '',
       rubriqueFacture,
     });
   }
 
   if (skippedRows > 0) {
-    console.warn(`[CSV Import] ⚠️ Total de lignes ignorées: ${skippedRows}/${rows.length}`);
+    console.warn(`[CSV Import] Total de lignes ignorees: ${skippedRows}/${rows.length}`);
   }
 
   return lignesData;
@@ -300,7 +331,7 @@ interface FactureAgregee {
   achat: number;
   lignes: {
     numeroAcces: string;
-    type: string;
+    type: number;
     abo: number;
     conso: number;
     remises: number;
@@ -322,7 +353,7 @@ function categorizeMontant(ligne: LigneData): "abo" | "conso" | "achat" | "remis
     ligne.typeCharge,
     ligne.libelleDetail,
     ligne.rubriqueFacture || "",
-    ligne.type
+    ligne.typeLabel
   );
   const rubrique = normalizeText(ligne.rubriqueFacture || "");
   const isNegative = ligne.montantHT < 0;
@@ -414,7 +445,7 @@ function aggregateFacturesData(lignesData: LigneData[]): FactureAgregee[] {
       if (!ligneEntry) {
         ligneEntry = {
           numeroAcces: ligne.numeroAcces,
-          type: ligne.type,
+          type: ligne.typeCode,
           abo: 0,
           conso: 0,
           remises: 0,
@@ -439,56 +470,60 @@ function aggregateFacturesData(lignesData: LigneData[]): FactureAgregee[] {
 
 export async function analyzeCSV(
   file: File,
-  entrepriseId: number
+  entrepriseId: number,
+  format?: CsvFormatConfig
 ): Promise<{ comptesACreer: CompteACreer[]; lignes_csv: number }> {
-  console.log(`[CSV Analyze] 🔍 Analyse du CSV pour l'entreprise ${entrepriseId}`);
+  const formatToUse = format || DEFAULT_CSV_FORMAT;
+  console.log(`[CSV Analyze] Analyse du CSV pour l'entreprise ${entrepriseId} avec le format ${formatToUse.id}`);
 
-  // 1. Parse le CSV
   const csvText = await file.text();
   const parseResult = Papa.parse<CSVRow>(csvText, {
     header: true,
     skipEmptyLines: true,
   });
 
-  const lignesData = extractLignesData(parseResult.data || []);
+  const lignesData = extractLignesData(parseResult.data || [], formatToUse);
   const facturesAgregees = aggregateFacturesData(lignesData);
 
-  // 2. Identifie les comptes uniques dans le CSV
   const comptesUniques = new Set<string>();
   facturesAgregees.forEach(f => comptesUniques.add(f.numeroCompte));
 
-  // 3. Récupère les comptes existants
   const comptesExistants = await getComptes(entrepriseId);
   const comptesExistantsSet = new Set(comptesExistants.map(c => c.num));
 
-  // 4. Identifie les comptes à créer
   const comptesACreer: CompteACreer[] = [];
   for (const numeroCompte of Array.from(comptesUniques)) {
     if (!comptesExistantsSet.has(numeroCompte)) {
       comptesACreer.push({
         num: numeroCompte,
         nom: `Compte ${numeroCompte}`,
-        lot: "Non défini",
+        lot: 'Non defini',
       });
     }
   }
 
-  console.log(`[CSV Analyze] ✅ ${comptesACreer.length} nouveaux comptes détectés`);
+  console.log(`[CSV Analyze] ${comptesACreer.length} nouveaux comptes detectes`);
   return { comptesACreer, lignes_csv: parseResult.data.length };
 }
 
-// ============================================================================
+
 // IMPORT CSV PRINCIPAL
 // ============================================================================
 
 export async function importCSV(
   file: File,
   entrepriseId: number,
-  comptesSelectionnes?: Set<string>, // Si fourni, ne crée que ces comptes
+  format?: CsvFormatConfig,
+  comptesSelectionnes?: Set<string>, // Si fourni, ne cr?e que ces comptes
   comptesOverrides?: CompteACreer[], // Permet d'ajuster nom/lot pour les nouveaux comptes
   onProgress?: (stage: string, percent: number) => void // Callback pour suivre la progression
 ): Promise<ImportResult> {
-  console.log(`[CSV Import] 🚀 Début de l'import pour l'entreprise ${entrepriseId}`);
+  const formatToUse = format || DEFAULT_CSV_FORMAT;
+  console.log(`[CSV Import] D?but de l'import pour l'entreprise ${entrepriseId} (format ${formatToUse.id})`);
+
+  // Identifier l'upload_id pour rattacher aux factures cr??es
+  let currentUploadId: string | null = null;
+
   const result: ImportResult = {
     success: false,
     stats: {
@@ -506,9 +541,9 @@ export async function importCSV(
   try {
     // 1. Parse le CSV
     onProgress?.("Lecture du fichier CSV...", 5);
-    console.log(`[CSV Import] 📄 Lecture du fichier CSV: ${file.name}`);
+    console.log(`[CSV Import] Lecture du fichier CSV: ${file.name}`);
     const csvText = await file.text();
-    const parseResult = Papa.parse<CSVRow>(csvText, {
+const parseResult = Papa.parse<CSVRow>(csvText, {
       header: true,
       skipEmptyLines: true,
     });
@@ -529,7 +564,7 @@ export async function importCSV(
     // 2. Extrait les lignes
     onProgress?.("Extraction des données...", 10);
     console.log(`[CSV Import] 🔄 Extraction des données`);
-    const lignesData = extractLignesData(parseResult.data || []);
+    const lignesData = extractLignesData(parseResult.data || [], formatToUse);
     console.log(`[CSV Import] ✅ ${lignesData.length} lignes de données extraites`);
 
     // 3. Agrège les factures
@@ -541,6 +576,30 @@ export async function importCSV(
     if (facturesAgregees.length > 0) {
       console.log(`[CSV Import] 🔍 Exemple de facture:`, facturesAgregees[0]);
     }
+
+  // Copie du CSV vers le backend (stockage disque) - dédup côté API
+  try {
+    const dates = facturesAgregees.map(f => f.date).filter(Boolean);
+    const dateMin = dates.length ? dates.reduce((a, b) => (a < b ? a : b)) : "";
+    const dateMax = dates.length ? dates.reduce((a, b) => (a > b ? a : b)) : "";
+    console.log("[CSV Import] Dates CSV détectées pour stockage:", { dateMin, dateMax, count: dates.length });
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("entreprise_name", `entreprise_${entrepriseId}`);
+    formData.append("category", "import_manual");
+    if (dateMin) formData.append("date_min", dateMin);
+    if (dateMax) formData.append("date_max", dateMax);
+    const res = await fetch(`${API_BASE_URL}/uploads`, { method: "POST", body: formData });
+    if (res.ok) {
+      const payload = await res.json().catch(() => ({}));
+      currentUploadId = payload?.upload?.upload_id || null;
+      console.log("[CSV Import] Copie du CSV envoyée au backend (storage) upload_id=", currentUploadId);
+    } else {
+      console.warn("[CSV Import] Copie CSV non effectuée (HTTP)", res.status);
+    }
+  } catch (err) {
+    console.warn("[CSV Import] Copie CSV non effectuée:", err);
+  }
 
     // ========================================================================
     // ÉTAPE 4: TRAITEMENT PAR COMPTE DE FACTURATION
@@ -581,7 +640,7 @@ export async function importCSV(
             num: numeroCompte,
             nom: override?.nom || `Compte ${numeroCompte}`,
             entreprise_id: entrepriseId,
-            lot: override?.lot || "Non défini",
+            lot: override?.lot || "Non defini",
           });
           comptesMap.set(numeroCompte, nouveauCompte);
           result.stats.comptes_crees++;
@@ -614,7 +673,7 @@ export async function importCSV(
       const progressPercent = 30 + Math.floor((compteIdx / comptesArray.length) * 20);
       onProgress?.(`Création des lignes (${compteIdx + 1}/${comptesArray.length})...`, progressPercent);
       // Identifie les lignes appartenant à ce compte dans le CSV
-      const lignesPourCeCompte = new Set<{ num: string; type: string }>();
+      const lignesPourCeCompte = new Set<{ num: string; type: number }>();
       facturesAgregees
         .filter(f => f.numeroCompte === numeroCompte)
         .forEach(f => {
@@ -720,7 +779,8 @@ export async function importCSV(
           conso: Math.round(factureData.conso * 100) / 100,
           remises: Math.round(factureData.remises * 100) / 100,
           achat: Math.round(factureData.achat * 100) / 100,
-          statut: "importé",
+          statut: 0,
+          csv_id: currentUploadId,
         });
         facturesCreees.set(factureKey, nouvelleFacture);
         result.stats.factures_creees++;
