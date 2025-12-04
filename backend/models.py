@@ -103,6 +103,7 @@ class LigneFacture(Base):
     conso = Column(Numeric(10, 2), nullable=False, default=0)
     remises = Column(Numeric(10, 2), nullable=False, default=0)
     achat = Column(Numeric(10, 2), nullable=False, default=0)
+    statut = Column(Integer, nullable=False, default=0)  # 0=importe,1=valide,2=conteste
 
     __table_args__ = (UniqueConstraint("facture_id", "ligne_id", name="uix_lignefacture_facture_ligne"),)
 

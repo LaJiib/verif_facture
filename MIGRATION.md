@@ -32,13 +32,26 @@ Entreprise
 
 Si les serveurs sont en cours d'exécution, appuyez sur **Ctrl+C** dans chaque fenêtre PowerShell (backend et frontend).
 
-### 2. Supprimer l'ancienne base de données
+### 2. Mettre à jour la base existante (nouvelle colonne `statut` sur `lignes_factures`)
+
+Si vous avez déjà une base existante, lancez la migration :
+
+```powershell
+python scripts/migrate_add_ligne_statut.py
+```
+
+La commande est idempotente : si la colonne existe déjà, rien n'est modifié.
+Par défaut, le script cherche la base à l’emplacement utilisé par l’exécutable installé :
+`%LOCALAPPDATA%\VerifFacture\data\invoices.db` (configuré dans `backend/config.py`). Vous pouvez
+forcer un autre chemin avec `VERIF_FACTURE_DB_PATH` ou `VERIF_FACTURE_DATA_DIR`.
+
+### 3. (Option) Recréer la base de données from scratch
 
 ```powershell
 Remove-Item backend\invoices.db
 ```
 
-### 3. Relancer les serveurs
+### 4. Relancer les serveurs
 
 ```powershell
 .\scripts\dev.ps1
@@ -46,11 +59,11 @@ Remove-Item backend\invoices.db
 
 La nouvelle base de données sera automatiquement créée avec le nouveau schéma au démarrage du backend.
 
-### 4. Créer une entreprise
+### 5. Créer une entreprise
 
 Dans l'interface web, cliquez sur **"Ajouter une entreprise"** dans le menu latéral.
 
-### 5. Importer un CSV
+### 6. Importer un CSV
 
 Les fichiers CSV au format Orange seront automatiquement analysés et les données seront réparties dans les 5 tables :
 

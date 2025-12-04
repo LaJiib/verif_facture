@@ -122,20 +122,40 @@ export async function autoVerifyEcart(factureId: number): Promise<AutoVerifEcart
   return res.json() as Promise<AutoVerifEcartResult>;
 }
 
-export async function autoVerifyGroupe(
-  factureId: number,
-  payload: { ligne_type: number; prix_abo: number }
-): Promise<AutoVerifGroupeResult> {
-  const res = await fetch(`${API_BASE_URL}/factures/${factureId}/autoverif/groupe`, {
-    method: "POST",
+// ============================================================================
+// API CALL - LIGNES-FACTURES (statut / mise à jour simple)
+// ============================================================================
+
+export interface LigneFacture {
+  id: number;
+  facture_id: number;
+  ligne_id: number;
+  abo: number;
+  conso: number;
+  remises: number;
+  achat: number;
+  statut: number;
+  total_ht: number;
+}
+
+export async function listLignesFactures(params?: { facture_id?: number; ligne_id?: number }): Promise<LigneFacture[]> {
+  const search = new URLSearchParams();
+  if (params?.facture_id !== undefined) search.append("facture_id", params.facture_id.toString());
+  if (params?.ligne_id !== undefined) search.append("ligne_id", params.ligne_id.toString());
+  const res = await fetch(`${API_BASE_URL}/lignes-factures${search.toString() ? `?${search}` : ""}`);
+  return handleResponse<LigneFacture[]>(res);
+}
+
+export async function updateLigneFacture(
+  id: number,
+  payload: { statut?: number; abo?: number; conso?: number; remises?: number; achat?: number }
+): Promise<LigneFacture> {
+  const res = await fetch(`${API_BASE_URL}/lignes-factures/${id}`, {
+    method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(body || "Erreur auto-vérification groupe");
-  }
-  return res.json() as Promise<AutoVerifGroupeResult>;
+  return handleResponse<LigneFacture>(res);
 }
 
 // ============================================================================

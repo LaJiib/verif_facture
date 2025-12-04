@@ -29,9 +29,19 @@ Push-Location $repoRoot
 python -m pip install -r requirements.txt
 Pop-Location
 
+# Migration embarqu?e (idempotente) : ajoute la colonne statut aux bases existantes si d?tect?es.
+Write-Host "==> Migration DB (colonne statut lignes_factures)" -ForegroundColor Cyan
+try {
+    python scripts/migrate_add_ligne_statut.py
+} catch {
+    Write-Host "Migration non appliqu?e (aucune base locale trouv?e ou Python indispo). Continuer..." -ForegroundColor Yellow
+}
+
 Write-Host "==> Packaging PyInstaller" -ForegroundColor Cyan
 Push-Location $repoRoot
 python -m PyInstaller pyinstaller.spec
 Pop-Location
 
 Write-Host "Build terminé. Exécutable: dist/VerifFacture.exe" -ForegroundColor Green
+
+

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { executeQuery, updateLigneType, getFactureRapport, upsertFactureRapport, updateFacture, autoVerifyEcart, autoVerifyGroupe } from "../newApi";
-import { decodeLineType, decodeFactureStatus } from "../utils/codecs";
+import { executeQuery, updateLigneType, getFactureRapport, upsertFactureRapport, updateFacture, listLignesFactures, updateLigneFacture } from "../newApi";
+import { decodeLineType, decodeFactureStatus, decodeLigneFactureStatus } from "../utils/codecs";
 import { exportFactureReportPdf } from "../utils/pdfReport";
 import { exportFactureReportDocx } from "../utils/docxReport";
+import { runAutoVerification, StatutValeur, LigneAnomalie } from "../utils/autoVerification";
 
 interface CompteDetailModalProps {
   compteId: number;
@@ -52,6 +53,7 @@ interface DetailLigne {
   ligne_id: number;
   ligne_num: string;
   ligne_type: number;
+  ligne_statut?: number;
   abo: number;
   conso: number;
   remises: number;
@@ -95,8 +97,6 @@ interface FactureLigneGroupe {
   netAbo: number;
   achat: number;
 }
-
-type StatutValeur = "valide" | "conteste" | "a_verifier";
 
 const statutTokens: Record<StatutValeur, { bg: string; color: string; label: string }> = {
   valide: { bg: "#ecfdf3", color: "#15803d", label: "Valide" },
@@ -177,6 +177,7 @@ export default function CompteDetailModal({
     Record<number, { aboNet?: string; ecart?: string; achat?: string; conso?: string }>
   >({});
   const [factureGroupComments, setFactureGroupComments] = useState<Record<number, Record<string, { aboNet?: string; achat?: string }>>>({});
+  const [factureGroupAnomalies, setFactureGroupAnomalies] = useState<Record<number, Record<string, LigneAnomalie[]>>>({});
   const [factureMetricReals, setFactureMetricReals] = useState<Record<number, { ecart?: string }>>({});
   const [factureGroupReals, setFactureGroupReals] = useState<Record<number, Record<string, { aboNet?: string; achat?: string }>>>({});
   const [autoLoading, setAutoLoading] = useState(false);
@@ -213,79 +214,45 @@ export default function CompteDetailModal({
     if (!factureCourante) return;
     try {
       setAutoLoading(true);
-      console.log("[Auto] Debut auto-verification (backend etapes)", {
+      console.log("[Auto] Debut auto-verification (frontend regroupe)", {
         facture_id: factureCourante.facture_id,
         facture_num: factureCourante.facture_num,
         csv_id: factureCourante.csv_id,
       });
 
-      // 1) Ecart global
-      const resEcart = await autoVerifyEcart(factureCourante.facture_id);
-      console.log("[Auto][Ecart] Reponse", resEcart);
-      const metricStatuts: { aboNet: StatutValeur; ecart: StatutValeur; achat: StatutValeur; conso: StatutValeur } = {
-        ...(factureStatuts[factureCourante.facture_id] || statutDefault),
-        ecart: resEcart.statut as StatutValeur,
-        achat: factureCourante.achat === 0 ? "valide" : "conteste",
-        aboNet: (factureStatuts[factureCourante.facture_id]?.aboNet || statutDefault.aboNet) as StatutValeur,
-        conso: (factureStatuts[factureCourante.facture_id]?.conso || statutDefault.conso) as StatutValeur,
-      };
-      const metricComments = { ...(factureMetricComments[factureCourante.facture_id] || {}), ecart: resEcart.commentaire || "" };
-      const metricReals = {} as { ecart?: string };
-      metricReals.ecart = Number(factureCourante.ecart ?? 0).toFixed(2);
-
-      // 2) Analyse par type : prefill statuts/commentaires (CSV + reference)
-      const groupStatuts: Record<string, { aboNet: StatutValeur; achat: StatutValeur }> = {};
-      const groupComments: Record<string, { aboNet?: string; achat?: string }> = {};
-      const groupReals: Record<string, { aboNet?: string; achat?: string }> = {};
-
-      for (const g of ligneGroupesFacture) {
-        const netUnitVal = g.count ? g.netAbo / g.count : Number(g.netAbo ?? 0);
-        const key = `${g.ligne_type}|${Number(netUnitVal || 0).toFixed(2)}`;
-        try {
-          const resG = await autoVerifyGroupe(factureCourante.facture_id, { ligne_type: g.ligne_type, prix_abo: netUnitVal });
-          console.log("[Auto][Groupe] Reponse", {
-            key,
-            ligne_type: g.ligne_type,
-            net_unit: netUnitVal,
-            achat: g.achat,
-            res: resG,
-          });
-          groupStatuts[key] = {
-            aboNet: resG.statut as StatutValeur,
-            achat: g.achat && g.achat !== 0 ? "conteste" : "valide",
-          };
-          const achatComment = g.achat && g.achat !== 0 ? `Achats détectés: ${Number(g.achat || 0).toFixed(2)} €` : "";
-          const summarizedContexts = summarizeCsvContexts(resG.csv_context);
-          const baseComments = [resG.commentaire, ...summarizedContexts, achatComment].filter(Boolean);
-          groupComments[key] = {
-            aboNet: baseComments.join(" | "),
-            achat: achatComment || undefined,
-          };
-          groupReals[key] = { aboNet: "", achat: "" };
-        } catch (err) {
-          console.warn("[Auto][Groupe] erreur", key, err);
-          const achatComment = g.achat && g.achat !== 0 ? `Achats détectés: ${g.achat.toFixed(2)} €` : "";
-          groupStatuts[key] = { aboNet: "a_verifier", achat: g.achat && g.achat !== 0 ? "conteste" : "a_verifier" };
-          groupComments[key] = { aboNet: ["Analyse indisponible", achatComment].filter(Boolean).join(" | "), achat: achatComment || undefined };
-          groupReals[key] = { aboNet: "", achat: "" };
-        }
-      }
-
-      setFactureStatuts((prev) => ({ ...prev, [factureCourante.facture_id]: metricStatuts }));
-      setFactureMetricComments((prev) => ({ ...prev, [factureCourante.facture_id]: metricComments }));
-      setFactureMetricReals((prev) => ({ ...prev, [factureCourante.facture_id]: metricReals }));
-      setFactureGroupStatuts((prev) => ({ ...prev, [factureCourante.facture_id]: groupStatuts }));
-      setFactureGroupComments((prev) => ({ ...prev, [factureCourante.facture_id]: groupComments }));
-      setFactureGroupReals((prev) => ({ ...prev, [factureCourante.facture_id]: groupReals }));
-      console.log("[Auto] Résumé calculé", {
-        facture_id: factureCourante.facture_id,
-        metricStatuts,
-        metricComments,
-        groupStatuts,
-        groupComments,
-        groupReals,
+      const autoResult = await runAutoVerification({
+        factureId: factureCourante.facture_id,
+        compteId,
+        factureDate: factureCourante.facture_date,
+        factureEcart: factureCourante.ecart,
+        factureAchat: factureCourante.achat,
+        existingMetricStatuts: factureStatuts[factureCourante.facture_id] || statutDefault,
+        existingMetricComments: factureMetricComments[factureCourante.facture_id] || {},
+        existingGroupStatuts: factureGroupStatuts[factureCourante.facture_id] || {},
+        existingGroupComments: factureGroupComments[factureCourante.facture_id] || {},
       });
-      alert("Auto (CSV) terminée : statuts et commentaires pré-remplis.");
+
+      setFactureStatuts((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.metricStatuts }));
+      setFactureMetricComments((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.metricComments }));
+      setFactureMetricReals((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.metricReals }));
+      setFactureGroupStatuts((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.groupStatuts }));
+      setFactureGroupComments((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.groupComments }));
+      setFactureGroupAnomalies((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.groupAnomalies }));
+
+      console.log("[Auto] Resume calcule", autoResult);
+      const { added, removed, modified, previousFactureId, previousFactureNum } = autoResult.summary;
+      const prevNumFromList =
+        previousFactureId !== null
+          ? detailFactures.find((f) => f.facture_id === previousFactureId)?.facture_num ||
+            prevFactures.find((f) => f.facture_id === previousFactureId)?.facture_num
+          : null;
+      const prevDisplay = previousFactureNum || prevNumFromList || previousFactureId;
+      alert(
+        `Auto (CSV+lignes) terminee : ${modified} ligne(s) modifiee(s), ${added} ajoutee(s), ${removed} supprimee(s)` +
+          (previousFactureId
+            ? ` (comparatif avec facture validee ${prevDisplay}).`
+            : " (pas de facture validee precedente).")
+      );
 
     } catch (err) {
       console.error("Auto verification error", err);
@@ -294,6 +261,7 @@ export default function CompteDetailModal({
       setAutoLoading(false);
     }
   }
+
 
   function exportPdf() {
     if (!factureCourante) return;
@@ -449,6 +417,7 @@ export default function CompteDetailModal({
           l.id as ligne_id,
           l.num as ligne_num,
           l.type as ligne_type,
+          lf.statut as ligne_statut,
           SUM(lf.abo) as abo,
           SUM(lf.conso) as conso,
           SUM(lf.remises) as remises,
@@ -477,6 +446,7 @@ export default function CompteDetailModal({
             l.id as ligne_id,
             l.num as ligne_num,
             l.type as ligne_type,
+            lf.statut as ligne_statut,
             SUM(lf.abo) as abo,
             SUM(lf.conso) as conso,
             SUM(lf.remises) as remises,
@@ -545,7 +515,7 @@ export default function CompteDetailModal({
           f.num as facture_num,
           f.date as facture_date,
           COALESCE(l.type, 'Non renseigne') as ligne_type,
-          ROUND(lf.abo, 2) as prix_abo,
+          ROUND(lf.abo + lf.remises, 2) as prix_abo,
           COUNT(lf.id) as count,
           SUM(lf.abo) as abo,
           SUM(lf.conso) as conso,
@@ -646,14 +616,14 @@ export default function CompteDetailModal({
   const totalAboNet = lignesGroupes.reduce((acc, g) => acc + g.netAbo, 0);
   const totalConsoLignes = lignesGroupes.reduce((acc, g) => acc + g.conso, 0);
 
-    const facturesAvecEcart = detailFactures.map((facture) => {
-      const lignes = factureLignesResume.find((fl) => fl.facture_id === facture.facture_id);
-      const lignesTotal = lignes?.lignes_total_ht ?? 0;
-      const ecart = facture.total_ht - lignesTotal;
-      return {
-        facture_id: facture.facture_id,
-        facture_num: facture.facture_num,
-        facture_date: facture.facture_date,
+  const facturesAvecEcart = detailFactures.map((facture) => {
+    const lignes = factureLignesResume.find((fl) => fl.facture_id === facture.facture_id);
+    const lignesTotal = lignes?.lignes_total_ht ?? 0;
+    const ecart = facture.total_ht - lignesTotal;
+    return {
+      facture_id: facture.facture_id,
+      facture_num: facture.facture_num,
+      facture_date: facture.facture_date,
         csv_id: (facture as any).csv_id,
         facture_total: facture.total_ht,
         lignes_total: lignesTotal,
@@ -696,6 +666,9 @@ export default function CompteDetailModal({
           }
           if (data.groupReals) {
             setFactureGroupReals((prev) => ({ ...prev, [selectedFactureId]: data.groupReals }));
+          }
+          if (data.groupAnomalies) {
+            setFactureGroupAnomalies((prev) => ({ ...prev, [selectedFactureId]: data.groupAnomalies }));
           }
         }
       } catch (err) {
@@ -747,6 +720,12 @@ export default function CompteDetailModal({
         [groupKey]: { ...(prev[factureId]?.[groupKey] || { aboNet: "a_verifier", achat: "a_verifier" }), [key]: value },
       },
     }));
+    // Propagation backend: si on change le statut aboNet, on met à jour les lignesFactures du groupe
+    if (key === "aboNet") {
+      applyGroupStatutToLines(factureId, groupKey, value).catch((err) => {
+        console.error("Erreur maj statut lignesFactures", err);
+      });
+    }
   }
 
   function updateMetricComment(factureId: number, key: "aboNet" | "ecart" | "achat" | "conso", value: string) {
@@ -783,6 +762,33 @@ export default function CompteDetailModal({
     }));
   }
 
+  const statutToCode: Record<StatutValeur, number> = { a_verifier: 0, valide: 1, conteste: 2 };
+
+  async function applyGroupStatutToLines(factureId: number, groupKey: string, value: StatutValeur) {
+    const [typeStr, netStr] = groupKey.split("|");
+    const groupType = Number(typeStr);
+    const targetNet = Number(netStr);
+    if (Number.isNaN(groupType) || Number.isNaN(targetNet)) return;
+    try {
+      const lignes = await listLignesFactures({ facture_id: factureId });
+      const toUpdate = lignes.filter((lf) => {
+        const type = editedTypes[lf.ligne_id];
+        if (type === undefined || type === null) return false;
+        const net = Number((Number(lf.abo || 0) + Number(lf.remises || 0)).toFixed(2));
+        return type === groupType && net === Number(targetNet.toFixed(2));
+      });
+      await Promise.all(
+        toUpdate.map((lf) =>
+          updateLigneFacture(lf.id, {
+            statut: statutToCode[value],
+          })
+        )
+      );
+    } catch (err) {
+      console.error("Impossible de mettre à jour le statut des lignesFactures du groupe", err);
+    }
+  }
+
   async function saveRapport() {
     if (!selectedFactureId) return;
     console.log("[RAPPORT][SAVE][START]", { factureId: selectedFactureId });
@@ -797,6 +803,7 @@ export default function CompteDetailModal({
         groupComments: factureGroupComments[selectedFactureId] || {},
         metricReals: factureMetricReals[selectedFactureId] || {},
         groupReals: factureGroupReals[selectedFactureId] || {},
+        groupAnomalies: factureGroupAnomalies[selectedFactureId] || {},
       },
     };
     try {
@@ -1306,11 +1313,12 @@ export default function CompteDetailModal({
                                   ? { field: "ligne_num", direction: prev.direction === "asc" ? "desc" : "asc" }
                                   : { field: "ligne_num", direction: "asc" }
                               )
-                            }
-                          >
-                            Numéro {ligneSort?.field === "ligne_num" ? (ligneSort.direction === "asc" ? "↑" : "↓") : ""}
-                          </th>
-                          <th style={{ padding: "0.75rem", textAlign: "left", fontWeight: "600" }}>Type</th>
+                        }
+                      >
+                        Numéro {ligneSort?.field === "ligne_num" ? (ligneSort.direction === "asc" ? "↑" : "↓") : ""}
+                      </th>
+                      <th style={{ padding: "0.75rem", textAlign: "left", fontWeight: "600" }}>Type</th>
+                      <th style={{ padding: "0.75rem", textAlign: "left", fontWeight: "600" }}>Statut</th>
                           <th
                             style={{ padding: "0.75rem", textAlign: "right", fontWeight: "600", cursor: "pointer" }}
                             onClick={() =>
@@ -1400,7 +1408,7 @@ export default function CompteDetailModal({
                               <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
                                 {(() => {
                                   const baseTypes = [0, 1, 2, 3];
-                                  const currentType = editedTypes[ligne.ligne_id] ?? ligne.ligne_type;
+                                  const currentType = editedTypes[ligne.ligne_id] ?? ligne.ligne_type ?? 3;
                                   const options = baseTypes.includes(currentType) ? baseTypes : [...baseTypes, currentType];
                                   return (
                                     <select
@@ -1429,6 +1437,7 @@ export default function CompteDetailModal({
                                 })()}
                               </div>
                             </td>
+                            <td style={{ padding: "0.75rem", color: "#374151" }}>{decodeLigneFactureStatus(ligne.ligne_statut)}</td>
                             <td style={{ padding: "0.75rem", textAlign: "right" }}>
                               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "0.15rem" }}>
                                  <span>{Number(ligne.abo || 0).toFixed(2)} €</span>
@@ -1699,11 +1708,11 @@ export default function CompteDetailModal({
                           </div>
                         </div>
 
-                                                <div style={{ ...rapportCardStyle, padding: "1rem" }}>
-                          <div style={{ marginBottom: "0.6rem", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
-                            <h4 style={{ margin: 0 }}>Regroupements de lignes</h4>
-                            <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Statut et commentaire par regroupement</span>
-                          </div>
+                          <div style={{ ...rapportCardStyle, padding: "1rem" }}>
+                            <div style={{ marginBottom: "0.6rem", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+                              <h4 style={{ margin: 0 }}>Regroupements de lignes</h4>
+                              <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Statut et commentaire par regroupement</span>
+                            </div>
                           <div style={{ overflowX: "auto" }}>
                             <table style={{ width: "100%", minWidth: "1100px", borderCollapse: "separate", borderSpacing: 0, fontSize: "0.86rem", tableLayout: "auto" }}>
                               <thead>
@@ -1721,9 +1730,10 @@ export default function CompteDetailModal({
                               </thead>
                               <tbody>
                                 {ligneGroupesFacture.map((g, idx) => {
-                                    const netUnitVal = g.count ? g.netAbo / g.count : Number(g.netAbo ?? 0);
-                                    const achatUnit = g.count ? g.achat / g.count : Number(g.achat ?? 0);
+                                    const netUnitVal = g.count ? g.netAbo / g.count : Number(g.netAbo || 0);
+                                    const achatUnit = g.count ? g.achat / g.count : Number(g.achat || 0);
                                     const key = `${g.ligne_type}|${Number(netUnitVal || 0).toFixed(2)}`;
+                                    const groupPrice = Number(key.split("|")[1]);
                                   const stat = factureGroupStatuts[factureCourante.facture_id]?.[key];
                                   const comment = factureGroupComments[factureCourante.facture_id]?.[key]?.aboNet || "";
                                   const commentAchat = factureGroupComments[factureCourante.facture_id]?.[key]?.achat || "";
@@ -1753,7 +1763,7 @@ export default function CompteDetailModal({
                                             </select>
                                           </div>
                                           <textarea
-                                            placeholder="Commentaire abo net"
+                                            placeholder="Commentaire"
                                             value={comment}
                                             onChange={(e) => updateGroupComment(factureCourante.facture_id, key, "aboNet", e.target.value)}
                                             style={{ width: "100%", padding: "0.42rem", borderRadius: "0.45rem", border: "1px solid #cbd5e1", minHeight: "60px", resize: "vertical", background: "#f8fafc" }}
@@ -1777,20 +1787,106 @@ export default function CompteDetailModal({
                                             </select>
                                           </div>
                                           <textarea
-                                            placeholder="Commentaire achats"
+                                            placeholder="Commentaire"
                                             value={commentAchat}
                                             onChange={(e) => updateGroupComment(factureCourante.facture_id, key, "achat", e.target.value)}
                                             style={{ width: "100%", padding: "0.42rem", borderRadius: "0.45rem", border: "1px solid #cbd5e1", minHeight: "60px", resize: "vertical", background: "#f8fafc" }}
                                           />
-                                        </div>
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
                           </div>
-                        </div>
+
+                          {/* Comparatif avant/après pour les lignes modifiées (point de vue ligne) */}
+                          <div style={{ ...rapportCardStyle, padding: "1rem" }}>
+                            <div style={{ marginBottom: "0.6rem", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+                              <h4 style={{ margin: 0 }}>Comparatif avant / après (lignes modifiées)</h4>
+                              <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Vu côté ligne (prix/groupe avant → après)</span>
+                            </div>
+                            <div style={{ overflowX: "auto" }}>
+                              <table style={{ width: "100%", minWidth: "900px", borderCollapse: "separate", borderSpacing: 0, fontSize: "0.86rem" }}>
+                                <thead>
+                                  <tr style={{ background: "#f8fafc", color: "#0f172a" }}>
+                                    <th style={{ textAlign: "left", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Ligne</th>
+                                    <th style={{ textAlign: "left", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Statut</th>
+                                    <th style={{ textAlign: "right", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Avant (net)</th>
+                                    <th style={{ textAlign: "right", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Après (net)</th>
+                                    <th style={{ textAlign: "right", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Delta</th>
+                                    <th style={{ textAlign: "left", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Commentaire</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {(() => {
+                                    const anomaliesByGroup = factureGroupAnomalies[factureCourante.facture_id] || {};
+                                    const rowsByLine: Record<string, any> = {};
+                                    Object.entries(anomaliesByGroup).forEach(([gKey, arr]) => {
+                                      (arr || []).forEach((a: any) => {
+                                        if (["net_change", "added", "removed"].includes(a.kind)) {
+                                          const lineKey = String(a.line || a.detail || `${gKey}-${a.kind}`);
+                                          const curr =
+                                            rowsByLine[lineKey] ||
+                                            {
+                                              line: a.line || "n/a",
+                                              before: null,
+                                              after: null,
+                                              kind: a.kind,
+                                              detail: a.detail || "",
+                                            };
+                                          if (a.kind === "removed") {
+                                            curr.before = Number(a.prev_net || 0);
+                                          } else if (a.kind === "added") {
+                                            curr.after = Number(a.curr_net || 0);
+                                          } else if (a.kind === "net_change") {
+                                            curr.before = Number(a.prev_net || 0);
+                                            curr.after = Number(a.curr_net || 0);
+                                          }
+                                          rowsByLine[lineKey] = curr;
+                                        }
+                                      });
+                                    });
+                                    const rowList = Object.values(rowsByLine);
+                                    if (rowList.length === 0) {
+                                      return (
+                                        <tr>
+                                          <td colSpan={8} style={{ padding: "0.85rem", textAlign: "center", color: "#6b7280" }}>
+                                            Aucune variation détectée sur les lignes.
+                                          </td>
+                                        </tr>
+                                      );
+                                    }
+                                    return rowList.map((row: any, idx: number) => {
+                                      const beforeVal = row.before !== null ? Number(row.before || 0).toFixed(2) : "";
+                                      const afterVal = row.after !== null ? Number(row.after || 0).toFixed(2) : "";
+                                      const delta =
+                                        row.before !== null && row.after !== null
+                                          ? (Number(row.after) - Number(row.before)).toFixed(2)
+                                          : row.after !== null
+                                          ? `+${Number(row.after).toFixed(2)}`
+                                          : row.before !== null
+                                          ? `-${Number(row.before).toFixed(2)}`
+                                          : "";
+                                      const rowBg = idx % 2 === 0 ? "#ffffff" : "#f9fafb";
+                                      return (
+                                        <tr key={`anom-${idx}`} style={{ background: rowBg, borderBottom: "1px solid #e5e7eb" }}>
+                                          <td style={{ padding: "0.65rem", fontWeight: 600 }}>{row.line || "n/a"}</td>
+                                          <td style={{ padding: "0.65rem" }}>{row.kind === "added" ? "Nouvelle ligne" : row.kind === "removed" ? "Supprimée" : "Modifiée"}</td>
+                                          <td style={{ padding: "0.65rem", textAlign: "right", color: "#9ca3af" }}>{beforeVal}</td>
+                                          <td style={{ padding: "0.65rem", textAlign: "right", color: "#0f172a" }}>{afterVal}</td>
+                                          <td style={{ padding: "0.65rem", textAlign: "right", fontWeight: 700 }}>{delta}</td>
+                                          <td style={{ padding: "0.65rem", maxWidth: "360px" }}>{row.detail || ""}</td>
+                                        </tr>
+                                      );
+                                    });
+                                  })()}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
 
                         <div style={{ ...rapportCardStyle, padding: "1rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>

@@ -39,3 +39,15 @@ export function decodeFactureStatus(code: number | null | undefined): string {
   if (code === null || code === undefined) return "Statut inconnu";
   return FACTURE_STATUS_LABELS[code] ?? `Statut ${code}`;
 }
+
+// Statut lignes_factures (0=importé,1=validé,2=contesté)
+const LIGNE_FACTURE_STATUS_LABELS: Record<number, string> = {
+  0: "Importé",
+  1: "Validé",
+  2: "Contesté",
+};
+
+export function decodeLigneFactureStatus(code: number | null | undefined): string {
+  if (code === null || code === undefined) return "Statut inconnu";
+  return LIGNE_FACTURE_STATUS_LABELS[code] ?? `Statut ${code}`;
+}

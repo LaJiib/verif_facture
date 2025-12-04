@@ -212,6 +212,7 @@ class LigneFactureCreate(BaseModel):
     conso: float = 0
     remises: float = 0
     achat: float = 0
+    statut: int = 0  # 0=importe,1=valide,2=conteste
 
 
 class LigneFactureUpdate(BaseModel):
@@ -219,6 +220,7 @@ class LigneFactureUpdate(BaseModel):
     conso: Optional[float] = None
     remises: Optional[float] = None
     achat: Optional[float] = None
+    statut: Optional[int] = None
 
 
 class LigneFactureResponse(BaseModel):
@@ -229,6 +231,7 @@ class LigneFactureResponse(BaseModel):
     conso: float
     remises: float
     achat: float
+    statut: int
     total_ht: float
 
     class Config:
@@ -242,6 +245,12 @@ class FactureReportPayload(BaseModel):
     commentaire: Optional[str] = None
     data: Optional[dict] = None
 
+
+class LigneFactureBulkStatut(BaseModel):
+    facture_id: int
+    ligne_ids: Optional[List[int]] = None   # IDs des lignes (ligne.id)
+    ligne_nums: Optional[List[str]] = None  # Alternatif : numéros de ligne (ligne.num)
+    statut: int  # 0=importe,1=valide,2=conteste
 
 class FactureReportResponse(BaseModel):
     facture_id: int
@@ -879,204 +888,6 @@ def auto_verif_ecart(facture_id: int, db: Session = Depends(get_db)):
         "details": {"lignes_sans_acces": slim_rows},
     }
 
-
-@app.post("/factures/{facture_id}/autoverif/groupe")
-def auto_verif_groupe(facture_id: int, payload: GroupeCheckPayload, db: Session = Depends(get_db)):
-    """
-    Verifie un type de lignes en comparant chaque ligne au dernier mois valide.
-    Detecte les changements de prix abo net unitaire ou les nouvelles/suppressions.
-    """
-    facture = db.query(Facture).filter(Facture.id == facture_id).first()
-    if not facture:
-        raise HTTPException(status_code=404, detail="Facture non trouvee")
-
-    type_label = {0: "Fixe", 1: "Mobile", 2: "Internet", 3: "Autre"}.get(payload.ligne_type, f"Type {payload.ligne_type}")
-
-    parsed_current = _parse_csv_rows_for_facture(facture.csv_id, facture.num) if facture.csv_id else None
-    rows_by_access = parsed_current.get("rows_by_access") if parsed_current else {}
-    lib_col = parsed_current.get("libelle_col") if parsed_current else None
-
-    def net_unit(lf: LigneFacture) -> float:
-        return float(lf.abo or 0) + float(lf.remises or 0)
-
-    curr_rows_all = (
-        db.query(LigneFacture, Ligne)
-        .join(Ligne, LigneFacture.ligne_id == Ligne.id)
-        .filter(LigneFacture.facture_id == facture.id, Ligne.type == payload.ligne_type)
-        .all()
-    )
-    def matches_price(lf: LigneFacture, target: Optional[float]) -> bool:
-        if target is None:
-            return True
-        unit = net_unit(lf)
-        return abs(unit - float(target)) < 0.01
-
-    curr_rows = [(lf, l) for lf, l in curr_rows_all if matches_price(lf, payload.prix_abo)]
-    # Si le filtre par prix exclut tout, on tombe en mode large (toutes les lignes du type)
-    if payload.prix_abo is not None and len(curr_rows) == 0:
-        curr_rows = curr_rows_all
-    curr_map = {l.id: {"lf": lf, "ligne": l} for lf, l in curr_rows}
-    curr_total_ht = sum(float(lf.total_ht or 0) for lf, _ in curr_rows)
-    curr_count = len(curr_rows)
-
-    prev_valid = (
-        db.query(Facture)
-        .filter(
-            Facture.compte_id == facture.compte_id,
-            Facture.statut == 1,
-            Facture.date < facture.date,
-        )
-        .order_by(Facture.date.desc())
-        .first()
-    )
-    if prev_valid and prev_valid.id != facture.id:
-        prev_rows_all = (
-            db.query(LigneFacture, Ligne)
-            .join(Ligne, LigneFacture.ligne_id == Ligne.id)
-            .filter(LigneFacture.facture_id == prev_valid.id, Ligne.type == payload.ligne_type)
-            .all()
-        )
-        prev_rows = [(lf, l) for lf, l in prev_rows_all if matches_price(lf, payload.prix_abo)]
-        if payload.prix_abo is not None and len(prev_rows) == 0:
-            prev_rows = prev_rows_all
-        prev_map = {l.id: {"lf": lf, "ligne": l} for lf, l in prev_rows}
-        has_reference = True
-    else:
-        prev_map = {}
-        has_reference = False
-        logger.info("[AUTO][GROUPE] aucune facture validee precedente | facture_id=%s | type=%s", facture_id, payload.ligne_type)
-
-    anomalies: list[str] = []
-    anomalies_detail: list[Dict[str, Any]] = []
-    context_entries: list[str] = []
-
-    for ligne_id, data in curr_map.items():
-        lf = data["lf"]
-        l = data["ligne"]
-        curr_net = net_unit(lf)
-        # Flag achats non nuls
-        try:
-            achat_val = float(lf.achat or 0)
-        except Exception:
-            achat_val = 0.0
-        if abs(achat_val) > 0.01:
-            label_achat = f"Ligne {l.num}: achat HT {achat_val:.2f} EUR"
-            rows = (rows_by_access or {}).get(str(l.num), [])[:1]
-            csv_info = {}
-            if rows:
-                csv_info = rows[0]
-            if rows and lib_col:
-                rbq_col = parsed_current.get("rubrique_col") if parsed_current else None
-                label_achat += f" ({rows[0].get(lib_col,'')}"
-                if rbq_col:
-                    label_achat += f" / {rows[0].get(rbq_col,'')}"
-                label_achat += ")"
-            anomalies.append(label_achat)
-            anomalies_detail.append({"line": l.num, "kind": "achat", "detail": label_achat, "csv": csv_info})
-            context_entries.append(label_achat)
-        prev_data = prev_map.get(ligne_id)
-        if prev_data:
-            prev_net = net_unit(prev_data["lf"])
-            if abs(curr_net - prev_net) > 0.01:
-                label = f"Ligne {l.num}: abo net {prev_net:.2f} -> {curr_net:.2f} EUR"
-                rows = (rows_by_access or {}).get(str(l.num), [])[:1]
-                csv_info = rows[0] if rows else {}
-                if rows and lib_col:
-                    label += f" ({rows[0].get(lib_col,'')})"
-                anomalies.append(label)
-                anomalies_detail.append(
-                    {"line": l.num, "kind": "net_change", "detail": label, "prev_net": prev_net, "curr_net": curr_net, "csv": csv_info}
-                )
-                context_entries.append(label)
-        else:
-            label = f"Ligne {l.num}: nouvelle ligne a {curr_net:.2f} EUR net"
-            rows = (rows_by_access or {}).get(str(l.num), [])[:1]
-            csv_info = rows[0] if rows else {}
-            if rows and lib_col:
-                label += f" ({rows[0].get(lib_col,'')})"
-            anomalies.append(label)
-            anomalies_detail.append({"line": l.num, "kind": "added", "detail": label, "curr_net": curr_net, "csv": csv_info})
-            context_entries.append(label)
-
-    for ligne_id, data in prev_map.items():
-        if ligne_id not in curr_map:
-            l = data["ligne"]
-            msg = f"Ligne {l.num}: absente ce mois-ci (precedemment presente)"
-            anomalies.append(msg)
-            anomalies_detail.append({"line": l.num, "kind": "removed", "detail": msg})
-
-    prev_total_ht = sum(float(v["lf"].total_ht or 0) for v in prev_map.values())
-    prev_count = len(prev_map)
-    delta_count = curr_count - prev_count
-    delta_total = curr_total_ht - prev_total_ht
-
-    if not has_reference:
-        target_str = f"{payload.prix_abo:.2f} EUR net" if payload.prix_abo is not None else "net unitaire inconnu"
-        commentaire = (
-            f"Groupe {type_label}: aucune facture validee de reference pour ce groupe (cible {target_str}). "
-            f"Lignes: {curr_count}, total HT du groupe: {curr_total_ht:.2f} EUR. "
-            "Verification manuelle recommandee."
-        )
-        statut = "conteste"
-    elif anomalies:
-        commentaire = f"Groupe {type_label}: variations detectees. " + " ; ".join(anomalies)
-        statut = "conteste"
-    else:
-        summary: dict[float, int] = {}
-        for lf, _ in curr_rows:
-            price = round(net_unit(lf), 2)
-            summary[price] = summary.get(price, 0) + 1
-        repartition = "; ".join(f"{cnt} ligne(s) a {price:.2f} EUR net" for price, cnt in sorted(summary.items()))
-        commentaire = f"Groupe {type_label}: aucun changement detecte. Repartition: {repartition or 'n/a'}."
-        statut = "valide" if curr_count > 0 else "conteste"
-
-    logger.info(
-        "[AUTO][GROUPE] facture_id=%s type=%s | prev={count:%s,total:%s} | curr={count:%s,total:%s} | anomalies=%d | statut=%s",
-        facture_id,
-        payload.ligne_type,
-        prev_count,
-        prev_total_ht,
-        curr_count,
-        curr_total_ht,
-        len(anomalies),
-        statut,
-    )
-
-    return {
-        "statut": statut,
-        "commentaire": commentaire,
-        "montant_attendu": curr_total_ht,
-        "delta_count": delta_count,
-        "delta_total": delta_total,
-        "csv_context": context_entries,
-        "anomalies": anomalies_detail,
-    }
-
-# ============================================================================ 
-# LLM local (Ollama Qwen2.5-0.5B)
-# ============================================================================
-
-class LlmSummarizeRequest(BaseModel):
-    texts: List[str]
-    system: Optional[str] = None
-
-
-@app.post("/llm/summarize")
-def llm_summarize(payload: LlmSummarizeRequest):
-    """
-    Répond en JSON structuré en s'appuyant sur Ollama (qwen2.5:0.5b).
-    Le modele doit etre pre-telecharge via `ollama pull qwen2.5:0.5b`.
-    """
-    if not payload.texts:
-        raise HTTPException(status_code=400, detail="Aucun texte fourni")
-
-    system_prompt = payload.system or (
-        "Tu es un assistant qui renvoie uniquement un objet JSON pour résumer des anomalies de facturation."
-    )
-    user_content = "\n".join(payload.texts)
-    parsed = _call_llm_structured(user_content, system_prompt)
-    return parsed
-
 # ============================================================================
 # ENDPOINTS - COMPTES
 # ============================================================================
@@ -1425,6 +1236,8 @@ def update_ligne_facture(
         db_ligne_facture.remises = ligne_facture.remises
     if ligne_facture.achat is not None:
         db_ligne_facture.achat = ligne_facture.achat
+    if ligne_facture.statut is not None:
+        db_ligne_facture.statut = ligne_facture.statut
 
     try:
         db.commit()
