@@ -1,9 +1,21 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { executeQuery, updateLigneType, getFactureRapport, upsertFactureRapport, updateFacture, listLignesFactures, updateLigneFacture } from "../newApi";
 import { decodeLineType, decodeFactureStatus, decodeLigneFactureStatus } from "../utils/codecs";
 import { exportFactureReportPdf } from "../utils/pdfReport";
 import { exportFactureReportDocx } from "../utils/docxReport";
 import { runAutoVerification, StatutValeur, LigneAnomalie } from "../utils/autoVerification";
+import { importCSV } from "../csvImporter";
+import { fetchUploadContent } from "../newApi";
+
+function useViewportWidth(): number {
+  const [width, setWidth] = useState<number>(() => (typeof window !== "undefined" ? window.innerWidth : 1280));
+  useEffect(() => {
+    const handler = () => setWidth(window.innerWidth);
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
+  return width;
+}
 
 interface CompteDetailModalProps {
   compteId: number;
@@ -159,6 +171,8 @@ export default function CompteDetailModal({
   const [factureLigneGroupes, setFactureLigneGroupes] = useState<FactureLigneGroupe[]>([]);
   const [selectedFactureId, setSelectedFactureId] = useState<number | null>(null);
   const [factureCommentaires, setFactureCommentaires] = useState<Record<number, string>>({});
+  const [logoDataUrl, setLogoDataUrl] = useState<string | null>(null);
+  const [logoSizeMm, setLogoSizeMm] = useState<{ width: number; height: number } | null>(null);
   const [factureStatuts, setFactureStatuts] = useState<
     Record<
       number,
@@ -181,15 +195,62 @@ export default function CompteDetailModal({
   const [factureMetricReals, setFactureMetricReals] = useState<Record<number, { ecart?: string }>>({});
   const [factureGroupReals, setFactureGroupReals] = useState<Record<number, Record<string, { aboNet?: string; achat?: string }>>>({});
   const [autoLoading, setAutoLoading] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [ligneSort, setLigneSort] = useState<{ field: keyof DetailLigne; direction: "asc" | "desc" } | null>(null);
   const [editedTypes, setEditedTypes] = useState<Record<number, number>>({});
   const [savingType, setSavingType] = useState<number | null>(null);
+  const [selectedTypes, setSelectedTypes] = useState<Set<number>>(new Set());
+  const [typeFilterOpen, setTypeFilterOpen] = useState(false);
+  const [typesInitialized, setTypesInitialized] = useState(false);
+  const viewportWidth = useViewportWidth();
+  const isWideDialog = viewportWidth >= 1400;
+  const isUltraWideDialog = viewportWidth >= 1800;
+  const dialogWidth = isUltraWideDialog ? "98%" : isWideDialog ? "97%" : "96%";
+  const dialogMaxWidth = isUltraWideDialog ? "1800px" : isWideDialog ? "1600px" : "1400px";
+  const dialogMaxHeight = isWideDialog ? "92vh" : "90vh";
+  const blockPadding = isWideDialog ? "1.5rem" : "1.1rem";
+  const tabPaddingY = isWideDialog ? "1rem" : "0.9rem";
+  const tabPaddingX = isWideDialog ? "1.6rem" : "1.2rem";
   const [rapportPanelCollapsed, setRapportPanelCollapsed] = useState(false);
 
   useEffect(() => {
     loadData();
   }, [compteId, mois]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadLogo() {
+      try {
+        const res = await fetch("/actice_logo.png");
+        if (!res.ok) return;
+        const blob = await res.blob();
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          if (cancelled || typeof reader.result !== "string") return;
+          const dataUrl = reader.result;
+          const img = new Image();
+          img.onload = () => {
+            if (cancelled) return;
+            const targetHeightMm = 12;
+            const ratio = img.width > 0 ? img.height / img.width : 0.4;
+            const heightMm = targetHeightMm;
+            const widthMm = ratio > 0 ? targetHeightMm / ratio : targetHeightMm * 1.8;
+            setLogoSizeMm({ width: widthMm, height: heightMm });
+            setLogoDataUrl(dataUrl);
+          };
+          img.src = dataUrl;
+        };
+        reader.readAsDataURL(blob);
+      } catch (err) {
+        console.warn("Logo non chargé", err);
+      }
+    }
+    loadLogo();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function formatMoisDisplay(dateKey: string): string {
     const [year, month] = dateKey.split("-");
@@ -283,6 +344,9 @@ export default function CompteDetailModal({
       groupComments: factureGroupComments[factureCourante.facture_id] || {},
       groupReals: factureGroupReals[factureCourante.facture_id] || {},
       globalComment: factureCommentaires[factureCourante.facture_id],
+      logoDataUrl: logoDataUrl || undefined,
+      logoWidthMm: logoSizeMm?.width,
+      logoHeightMm: logoSizeMm?.height,
       groupes: ligneGroupesFacture.map((g) => {
         const netUnit = g.count ? g.netAbo / g.count : 0;
         return {
@@ -616,6 +680,45 @@ export default function CompteDetailModal({
   const totalAboNet = lignesGroupes.reduce((acc, g) => acc + g.netAbo, 0);
   const totalConsoLignes = lignesGroupes.reduce((acc, g) => acc + g.conso, 0);
 
+  const typesDisponibles = Array.from(
+    new Set(detailLignes.map((l) => (l.ligne_type ?? 3)))
+  ).sort((a, b) => a - b);
+
+  const lignesFiltrees = useMemo(() => {
+    if (selectedTypes.size === 0) return [];
+    return detailLignes.filter((l) => selectedTypes.has(l.ligne_type ?? 3));
+  }, [detailLignes, selectedTypes]);
+
+  useEffect(() => {
+    // Initialise le filtre type une seule fois avec tous les types présents,
+    // puis ajoute uniquement les nouveaux types si besoin.
+    if (!typesInitialized) {
+      if (typesDisponibles.length > 0) {
+        setSelectedTypes(new Set(typesDisponibles));
+        setTypesInitialized(true);
+      }
+      return;
+    }
+    // Si aucun type n'est sélectionné (choix utilisateur), ne pas réactiver automatiquement
+    if (selectedTypes.size === 0) return;
+
+    // Synchronise avec les types disponibles : supprime les types absents, ajoute les nouveaux
+    const next = new Set<number>();
+    typesDisponibles.forEach((t) => {
+      if (selectedTypes.has(t)) {
+        next.add(t);
+      }
+    });
+    let updated = next.size !== selectedTypes.size;
+    typesDisponibles.forEach((t) => {
+      if (!next.has(t)) {
+        next.add(t);
+        updated = true;
+      }
+    });
+    if (updated) setSelectedTypes(next);
+  }, [typesDisponibles, typesInitialized, selectedTypes]);
+
   const facturesAvecEcart = detailFactures.map((facture) => {
     const lignes = factureLignesResume.find((fl) => fl.facture_id === facture.facture_id);
     const lignesTotal = lignes?.lignes_total_ht ?? 0;
@@ -636,10 +739,11 @@ export default function CompteDetailModal({
   const facturesEnAlerte = facturesAvecEcart.filter((f) => Math.abs(f.ecart) > 0.05);
 
   useEffect(() => {
-    if (activeTab === "rapport" && detailFactures.length > 0 && selectedFactureId === null) {
+    // Sélection par défaut de la première facture du mois dès que les données sont chargées
+    if (selectedFactureId === null && detailFactures.length > 0) {
       setSelectedFactureId(detailFactures[0].facture_id);
     }
-  }, [activeTab, detailFactures, selectedFactureId]);
+  }, [detailFactures, selectedFactureId]);
 
   useEffect(() => {
     async function fetchRapport() {
@@ -866,6 +970,34 @@ export default function CompteDetailModal({
     }
   }
 
+  async function resetFromCsv() {
+    if (!factureCourante?.csv_id) {
+      alert("Aucun CSV associé à cette facture.");
+      return;
+    }
+    try {
+      setResetLoading(true);
+      // Récupère entreprise_id du compte
+      const compteRow = await executeQuery(`SELECT entreprise_id, num FROM comptes WHERE id = ${compteId} LIMIT 1`);
+      const entrepriseId = compteRow.data?.[0]?.entreprise_id;
+      const compteNumDb = compteRow.data?.[0]?.num;
+      if (!entrepriseId) {
+        alert("Impossible de trouver l'entreprise pour ce compte.");
+        return;
+      }
+      const csvText = await fetchUploadContent(factureCourante.csv_id);
+      const file = new File([csvText], `${factureCourante.facture_num || "facture"}.csv`, { type: "text/csv" });
+      await importCSV(file, entrepriseId, undefined, new Set([compteNumDb || compteNum]));
+      await loadData();
+      alert("Reset CSV terminé : données ré-analysées pour ce compte.");
+    } catch (err) {
+      console.error("Reset CSV error", err);
+      alert("Reset CSV impossible : " + (err as Error).message);
+    } finally {
+      setResetLoading(false);
+    }
+  }
+
   return (
     <div
       style={{
@@ -887,9 +1019,9 @@ export default function CompteDetailModal({
           position: "relative",
           background: "white",
           borderRadius: "0.5rem",
-          width: "96%",
-          maxWidth: "1400px",
-          maxHeight: "90vh",
+          width: dialogWidth,
+          maxWidth: dialogMaxWidth,
+          maxHeight: dialogMaxHeight,
           display: "flex",
           flexDirection: "column",
           boxShadow: "0 10px 25px rgba(0,0,0,0.3)",
@@ -953,11 +1085,12 @@ export default function CompteDetailModal({
         {/* Header */}
                         <div
                           style={{
-                            padding: "1.5rem",
+                            padding: blockPadding,
                             borderBottom: "1px solid #e5e7eb",
                             display: "flex",
                             justifyContent: "space-between",
                             alignItems: "center",
+                            gap: "1rem",
                           }}
                         >
                           <div>
@@ -999,7 +1132,7 @@ export default function CompteDetailModal({
           <button
             onClick={() => setActiveTab("stats")}
             style={{
-              padding: "1rem 1.5rem",
+              padding: `${tabPaddingY} ${tabPaddingX}`,
               border: "none",
               background: activeTab === "stats" ? "white" : "transparent",
               borderBottom: activeTab === "stats" ? "2px solid #3b82f6" : "2px solid transparent",
@@ -1013,7 +1146,7 @@ export default function CompteDetailModal({
           <button
             onClick={() => setActiveTab("factures")}
             style={{
-              padding: "1rem 1.5rem",
+              padding: `${tabPaddingY} ${tabPaddingX}`,
               border: "none",
               background: activeTab === "factures" ? "white" : "transparent",
               borderBottom: activeTab === "factures" ? "2px solid #3b82f6" : "2px solid transparent",
@@ -1027,7 +1160,7 @@ export default function CompteDetailModal({
           <button
             onClick={() => setActiveTab("lignes")}
             style={{
-              padding: "1rem 1.5rem",
+              padding: `${tabPaddingY} ${tabPaddingX}`,
               border: "none",
               background: activeTab === "lignes" ? "white" : "transparent",
               borderBottom: activeTab === "lignes" ? "2px solid #3b82f6" : "2px solid transparent",
@@ -1041,7 +1174,7 @@ export default function CompteDetailModal({
           <button
             onClick={() => setActiveTab("rapport")}
             style={{
-              padding: "1rem 1.5rem",
+              padding: `${tabPaddingY} ${tabPaddingX}`,
               border: "none",
               background: activeTab === "rapport" ? "white" : "transparent",
               borderBottom: activeTab === "rapport" ? "2px solid #3b82f6" : "2px solid transparent",
@@ -1055,7 +1188,7 @@ export default function CompteDetailModal({
         </div>
 
         {/* Content */}
-        <div style={{ padding: "1.5rem", overflow: "auto", flex: 1 }}>
+        <div style={{ padding: blockPadding, overflow: "auto", flex: 1 }}>
           {isLoading ? (
             <div style={{ textAlign: "center", padding: "2rem", color: "#6b7280" }}>
               Chargement...
@@ -1298,9 +1431,12 @@ export default function CompteDetailModal({
               {/* TAB: Détail par ligne */}
               {activeTab === "lignes" && (
                 <div>
-                  <h3 style={{ marginBottom: "1rem" }}>
-                    {detailLignes.length} ligne(s) télécom
-                  </h3>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+                    <h3 style={{ margin: 0 }}>
+                      {lignesFiltrees.length} ligne(s) télécom
+                      {selectedTypes.size === typesDisponibles.length ? "" : ` / ${detailLignes.length}`}
+                    </h3>
+                  </div>
                   <div style={{ overflow: "auto" }}>
                     <table style={{ width: "100%", borderCollapse: "collapse" }}>
                       <thead>
@@ -1317,7 +1453,84 @@ export default function CompteDetailModal({
                       >
                         Numéro {ligneSort?.field === "ligne_num" ? (ligneSort.direction === "asc" ? "↑" : "↓") : ""}
                       </th>
-                      <th style={{ padding: "0.75rem", textAlign: "left", fontWeight: "600" }}>Type</th>
+                      <th style={{ padding: "0.75rem", textAlign: "left", fontWeight: "600", position: "relative", minWidth: "180px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                          <span>Type</span>
+                          <button
+                            className="secondary-button"
+                            style={{ padding: "0.15rem 0.4rem", fontSize: "0.8rem", display: "inline-flex", alignItems: "center", gap: "0.2rem" }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setTypeFilterOpen((prev) => !prev);
+                            }}
+                          >
+                            <span style={{ fontWeight: 700 }}>⏷</span>
+                          </button>
+                        </div>
+                        {typeFilterOpen && (
+                          <div
+                            style={{
+                              position: "absolute",
+                              top: "calc(100% + 0.35rem)",
+                              left: 0,
+                              background: "white",
+                              border: "1px solid #e5e7eb",
+                              borderRadius: "0.5rem",
+                              boxShadow: "0 10px 30px rgba(0,0,0,0.12)",
+                              padding: "0.75rem",
+                              zIndex: 25,
+                              minWidth: "220px",
+                            }}
+                          >
+                            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem", flexWrap: "wrap" }}>
+                              <button
+                                className="secondary-button"
+                                style={{ padding: "0.3rem 0.55rem", fontWeight: 600 }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedTypes(new Set(typesDisponibles));
+                                }}
+                              >
+                                Tout
+                              </button>
+                              <button
+                                className="secondary-button"
+                                style={{ padding: "0.3rem 0.55rem", fontWeight: 600 }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedTypes(new Set());
+                                }}
+                              >
+                                Aucun
+                              </button>
+                            </div>
+                            <div style={{ display: "grid", gap: "0.35rem" }}>
+                              {typesDisponibles.map((t) => {
+                                const checked = selectedTypes.has(t);
+                                return (
+                                  <label key={`type-filter-${t}`} style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={checked}
+                                      onChange={(e) => {
+                                        e.stopPropagation();
+                                        setSelectedTypes((prev) => {
+                                          const next = new Set(prev);
+                                          if (next.has(t)) next.delete(t);
+                                          else next.add(t);
+                                          return next;
+                                        });
+                                      }}
+                                    />
+                                    <span>{decodeLineType(t)}</span>
+                                  </label>
+                                );
+                              })}
+                              {typesDisponibles.length === 0 && <span style={{ color: "#9ca3af" }}>Aucun type disponible</span>}
+                            </div>
+                          </div>
+                        )}
+                      </th>
                       <th style={{ padding: "0.75rem", textAlign: "left", fontWeight: "600" }}>Statut</th>
                           <th
                             style={{ padding: "0.75rem", textAlign: "right", fontWeight: "600", cursor: "pointer" }}
@@ -1382,20 +1595,21 @@ export default function CompteDetailModal({
                         </tr>
                       </thead>
                       <tbody>
-                        {([...detailLignes].sort((a, b) => {
-                          if (!ligneSort) return 0;
-                          const { field, direction } = ligneSort;
-                          const av = a[field];
-                          const bv = b[field];
-                          const factor = direction === "asc" ? 1 : -1;
-                          if (typeof av === "number" && typeof bv === "number") {
-                            return av === bv ? 0 : av > bv ? factor : -factor;
-                          }
-                          if (typeof av === "string" && typeof bv === "string") {
-                            return av.localeCompare(bv) * factor;
-                          }
-                          return 0;
-                        }) as DetailLigne[]).map((ligne, idx) => (
+                        {([...lignesFiltrees]
+                          .sort((a, b) => {
+                            if (!ligneSort) return 0;
+                            const { field, direction } = ligneSort;
+                            const av = a[field];
+                            const bv = b[field];
+                            const factor = direction === "asc" ? 1 : -1;
+                            if (typeof av === "number" && typeof bv === "number") {
+                              return av === bv ? 0 : av > bv ? factor : -factor;
+                            }
+                            if (typeof av === "string" && typeof bv === "string") {
+                              return av.localeCompare(bv) * factor;
+                            }
+                            return 0;
+                          }) as DetailLigne[]).map((ligne, idx) => (
                           <tr
                             key={idx}
                             style={{
@@ -1495,6 +1709,27 @@ export default function CompteDetailModal({
                             </td>
                           </tr>
                         ))}
+                        {lignesFiltrees.length === 0 && (
+                          <tr>
+                            <td colSpan={8} style={{ padding: "1rem", textAlign: "center", color: "#6b7280" }}>
+                              Aucune ligne à afficher avec ce filtre.
+                              {typesDisponibles.length > 0 && (
+                                <div style={{ marginTop: "0.5rem" }}>
+                                  <button
+                                    className="secondary-button"
+                                    style={{ padding: "0.4rem 0.75rem", fontWeight: 600 }}
+                                    onClick={() => {
+                                      setSelectedTypes(new Set(typesDisponibles));
+                                      setTypeFilterOpen(true);
+                                    }}
+                                  >
+                                    Réactiver tous les types
+                                  </button>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
                       </tbody>
                     </table>
                   </div>
@@ -1617,7 +1852,7 @@ export default function CompteDetailModal({
                                 whiteSpace: "nowrap",
                               }}
                             >
-                              {autoLoading ? "Auto en cours..." : "Auto (CSV)"}
+                              {autoLoading ? "Auto en cours..." : "Auto"}
                             </button>
                             <button
                               onClick={exportPdf}
@@ -1737,6 +1972,21 @@ export default function CompteDetailModal({
                                   const stat = factureGroupStatuts[factureCourante.facture_id]?.[key];
                                   const comment = factureGroupComments[factureCourante.facture_id]?.[key]?.aboNet || "";
                                   const commentAchat = factureGroupComments[factureCourante.facture_id]?.[key]?.achat || "";
+                                  const anomaliesForGroup = factureGroupAnomalies[factureCourante.facture_id]?.[key] || [];
+                                  const counts = anomaliesForGroup.reduce(
+                                    (acc: Record<string, number>, a: any) => {
+                                      if (a?.kind && acc[a.kind] !== undefined) acc[a.kind] += 1;
+                                      return acc;
+                                    },
+                                    { added: 0, removed: 0, net_change: 0 }
+                                  );
+                                  const summaryParts: string[] = [];
+                                  if (counts.added > 5) summaryParts.push(`${counts.added} ligne(s) ajoutée(s)`);
+                                  if (counts.removed > 5) summaryParts.push(`${counts.removed} ligne(s) supprimée(s)`);
+                                  if (counts.net_change > 5) summaryParts.push(`${counts.net_change} ligne(s) modifiée(s)`);
+                                  const autoSummary = summaryParts.join(" ; ");
+                                  const commentDisplay = autoSummary || comment;
+                                  const commentAchatDisplay = autoSummary || commentAchat;
                                   const rowBg = idx % 2 === 0 ? "#ffffff" : "#f9fafb";
                                   return (
                                     <tr key={`${key}-${idx}`} style={{ background: rowBg, borderBottom: "1px solid #e5e7eb", verticalAlign: "top" }}>
@@ -1764,7 +2014,7 @@ export default function CompteDetailModal({
                                           </div>
                                           <textarea
                                             placeholder="Commentaire"
-                                            value={comment}
+                                            value={commentDisplay}
                                             onChange={(e) => updateGroupComment(factureCourante.facture_id, key, "aboNet", e.target.value)}
                                             style={{ width: "100%", padding: "0.42rem", borderRadius: "0.45rem", border: "1px solid #cbd5e1", minHeight: "60px", resize: "vertical", background: "#f8fafc" }}
                                           />
@@ -1788,7 +2038,7 @@ export default function CompteDetailModal({
                                           </div>
                                           <textarea
                                             placeholder="Commentaire"
-                                            value={commentAchat}
+                                            value={commentAchatDisplay}
                                             onChange={(e) => updateGroupComment(factureCourante.facture_id, key, "achat", e.target.value)}
                                             style={{ width: "100%", padding: "0.42rem", borderRadius: "0.45rem", border: "1px solid #cbd5e1", minHeight: "60px", resize: "vertical", background: "#f8fafc" }}
                                           />
@@ -1862,22 +2112,38 @@ export default function CompteDetailModal({
                                     return rowList.map((row: any, idx: number) => {
                                       const beforeVal = row.before !== null ? Number(row.before || 0).toFixed(2) : "";
                                       const afterVal = row.after !== null ? Number(row.after || 0).toFixed(2) : "";
+                                      const deltaNum =
+                                        row.before !== null && row.after !== null
+                                          ? Number(row.after) - Number(row.before)
+                                          : row.after !== null
+                                          ? Number(row.after)
+                                          : row.before !== null
+                                          ? -Number(row.before)
+                                          : 0;
                                       const delta =
                                         row.before !== null && row.after !== null
-                                          ? (Number(row.after) - Number(row.before)).toFixed(2)
+                                          ? deltaNum.toFixed(2)
                                           : row.after !== null
                                           ? `+${Number(row.after).toFixed(2)}`
                                           : row.before !== null
                                           ? `-${Number(row.before).toFixed(2)}`
                                           : "";
-                                      const rowBg = idx % 2 === 0 ? "#ffffff" : "#f9fafb";
+                                      const rowBg =
+                                        row.kind === "added"
+                                          ? "#ecfdf3"
+                                          : row.kind === "removed"
+                                          ? "#fef2f2"
+                                          : idx % 2 === 0
+                                          ? "#ffffff"
+                                          : "#f9fafb";
+                                      const deltaColor = deltaNum > 0 ? "#16a34a" : deltaNum < 0 ? "#dc2626" : "#374151";
                                       return (
                                         <tr key={`anom-${idx}`} style={{ background: rowBg, borderBottom: "1px solid #e5e7eb" }}>
                                           <td style={{ padding: "0.65rem", fontWeight: 600 }}>{row.line || "n/a"}</td>
                                           <td style={{ padding: "0.65rem" }}>{row.kind === "added" ? "Nouvelle ligne" : row.kind === "removed" ? "Supprimée" : "Modifiée"}</td>
                                           <td style={{ padding: "0.65rem", textAlign: "right", color: "#9ca3af" }}>{beforeVal}</td>
                                           <td style={{ padding: "0.65rem", textAlign: "right", color: "#0f172a" }}>{afterVal}</td>
-                                          <td style={{ padding: "0.65rem", textAlign: "right", fontWeight: 700 }}>{delta}</td>
+                                          <td style={{ padding: "0.65rem", textAlign: "right", fontWeight: 700, color: deltaColor }}>{delta}</td>
                                           <td style={{ padding: "0.65rem", maxWidth: "360px" }}>{row.detail || ""}</td>
                                         </tr>
                                       );
@@ -1953,20 +2219,37 @@ export default function CompteDetailModal({
         >
           <div>
             {mois && onDeleteMonth && (
-              <button
-                onClick={onDeleteMonth}
-                style={{
-                  padding: "0.6rem 1rem",
-                  background: "#ef4444",
-                  color: "white",
-                  border: "none",
-                  borderRadius: "0.35rem",
-                  cursor: "pointer",
-                  fontWeight: 600,
-                }}
-              >
-                Supprimer
-              </button>
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                <button
+                  onClick={onDeleteMonth}
+                  style={{
+                    padding: "0.6rem 1rem",
+                    background: "#ef4444",
+                    color: "white",
+                    border: "none",
+                    borderRadius: "0.35rem",
+                    cursor: "pointer",
+                    fontWeight: 600,
+                  }}
+                >
+                  Supprimer
+                </button>
+                <button
+                  onClick={resetFromCsv}
+                  disabled={resetLoading || autoLoading}
+                  style={{
+                    padding: "0.6rem 1rem",
+                    background: resetLoading ? "#86efac" : "#22c55e",
+                    color: "white",
+                    border: "1px solid #16a34a",
+                    borderRadius: "0.35rem",
+                    cursor: resetLoading ? "not-allowed" : "pointer",
+                    fontWeight: 600,
+                  }}
+                >
+                  {resetLoading ? "Reset..." : "Reset"}
+                </button>
+              </div>
             )}
           </div>
 

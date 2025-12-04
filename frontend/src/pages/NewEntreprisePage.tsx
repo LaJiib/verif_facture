@@ -1,5 +1,5 @@
 import React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   getEntreprise,
   executeQuery,
@@ -12,6 +12,16 @@ import { decodeFactureStatus } from "../utils/codecs";
 import { exportLotRecapPdf } from "../utils/pdfReport";
 import { StatusBar } from "../utils/statusBar";
 import CompteDetailModal from "../components/CompteDetailModal";
+
+function useViewportWidth(): number {
+  const [width, setWidth] = useState<number>(() => (typeof window !== "undefined" ? window.innerWidth : 1280));
+  useEffect(() => {
+    const handler = () => setWidth(window.innerWidth);
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
+  return width;
+}
 
 interface EntreprisePageProps {
   entrepriseId: number;
@@ -60,6 +70,8 @@ export default function EntreprisePage({
 }: EntreprisePageProps) {
   const [entreprise, setEntreprise] = useState<Entreprise | null>(null);
   const [moisData, setMoisData] = useState<MoisData[]>([]);
+  const [moisOrder, setMoisOrder] = useState<"asc" | "desc">("asc");
+  const [selectedMonths, setSelectedMonths] = useState<Set<string>>(new Set());
   const [lotsData, setLotsData] = useState<LotData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +85,25 @@ export default function EntreprisePage({
   // Modal de détail
   const [selectedCompte, setSelectedCompte] = useState<DetailModalData | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const viewportWidth = useViewportWidth();
+  const isWideTable = viewportWidth >= 1400;
+  const isUltraWideTable = viewportWidth >= 1800;
+  // On privilégie l'affichage du maximum de colonnes : padding compact et colonne sticky resserrée
+  const cellPadding = isUltraWideTable ? "0.55rem" : isWideTable ? "0.5rem" : "0.45rem";
+  const stickyColWidth = isUltraWideTable ? "200px" : isWideTable ? "180px" : "170px";
+  const tableFontSize = isWideTable ? "0.85rem" : "0.82rem";
+  const tableMaxHeight = isWideTable ? "calc(100vh - 200px)" : "calc(100vh - 240px)";
+  const moisAffiches = useMemo(
+    () =>
+      [...moisData].sort((a, b) =>
+        moisOrder === "asc" ? a.date_key.localeCompare(b.date_key) : b.date_key.localeCompare(a.date_key)
+      ),
+    [moisData, moisOrder]
+  );
+  const moisFiltres = useMemo(() => {
+    if (selectedMonths.size === 0) return [];
+    return moisAffiches.filter((m) => selectedMonths.has(m.date_key));
+  }, [moisAffiches, selectedMonths]);
 
   useEffect(() => {
     loadData();
@@ -198,6 +229,7 @@ export default function EntreprisePage({
             mois: formatMois(dateKey),
           }))
       );
+      setSelectedMonths(new Set(Array.from(moisSet)));
 
       setLotsData(
         Array.from(lotsMap.values())
@@ -278,10 +310,30 @@ export default function EntreprisePage({
     );
   }
 
+  function toggleMonthVisible(dateKey: string) {
+    setSelectedMonths((prev) => {
+      const next = new Set(prev);
+      if (next.has(dateKey)) {
+        next.delete(dateKey);
+      } else {
+        next.add(dateKey);
+      }
+      return next;
+    });
+  }
+
+  function setAllMonthsVisible(all: boolean) {
+    if (all) {
+      setSelectedMonths(new Set(moisAffiches.map((m) => m.date_key)));
+    } else {
+      setSelectedMonths(new Set());
+    }
+  }
+
   function openExportLot(lotName: string) {
     setExportLot({
       lot: lotName,
-      months: new Set(moisData.map((m) => m.date_key)),
+      months: new Set(moisAffiches.map((m) => m.date_key)),
     });
   }
 
@@ -341,7 +393,7 @@ export default function EntreprisePage({
   }
 
   function getCompteMonths(compteId: number): string[] {
-    return moisData
+    return moisAffiches
       .map((m) => m.date_key)
       .filter((dateKey) =>
         lotsData.some((lot) =>
@@ -488,7 +540,7 @@ export default function EntreprisePage({
 
   if (isLoading) {
     return (
-      <div className="app">
+      <div className="app app--fullwidth">
         <p className="loading">Chargement...</p>
       </div>
     );
@@ -496,7 +548,7 @@ export default function EntreprisePage({
 
   if (error) {
     return (
-      <div className="app">
+      <div className="app app--fullwidth">
         <button onClick={onBack} className="back-button">
           ← Retour
         </button>
@@ -507,7 +559,7 @@ export default function EntreprisePage({
 
   if (!entreprise || moisData.length === 0) {
     return (
-      <div className="app">
+      <div className="app app--fullwidth">
         <button onClick={onBack} className="back-button">
           ← Retour
         </button>
@@ -520,28 +572,100 @@ export default function EntreprisePage({
   }
 
   return (
-    <div className="app">
+    <div className="app app--fullwidth">
       <button onClick={onBack} className="back-button">
         ← Retour
       </button>
       <h1>{entreprise.nom}</h1>
 
       <section className="card">
-        <h2>Vue détaillée des factures par lot</h2>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
+          <h2 style={{ margin: 0 }}>Vue détaillée des factures par lot</h2>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+            <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Tri des mois</span>
+            <button
+              onClick={() => setMoisOrder((prev) => (prev === "asc" ? "desc" : "asc"))}
+              className="secondary-button"
+              style={{ padding: "0.4rem 0.75rem", fontWeight: 600 }}
+            >
+              {moisOrder === "asc" ? "Ancien → Récent" : "Récent → Ancien"}
+            </button>
+          </div>
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.75rem",
+            flexWrap: "wrap",
+            margin: "0.5rem 0 0.75rem",
+          }}
+        >
+          <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Mois affichés</span>
+          <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+            <button
+              className="secondary-button"
+              style={{ padding: "0.35rem 0.7rem", fontWeight: 600 }}
+              onClick={() => setAllMonthsVisible(true)}
+            >
+              Tout
+            </button>
+            <button
+              className="secondary-button"
+              style={{ padding: "0.35rem 0.7rem", fontWeight: 600 }}
+              onClick={() => setAllMonthsVisible(false)}
+            >
+              Aucun
+            </button>
+            {moisAffiches.map((m) => {
+              const checked = selectedMonths.has(m.date_key);
+              return (
+                <label
+                  key={`mois-filter-${m.date_key}`}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "0.3rem",
+                    background: checked ? "#eef2ff" : "#f8fafc",
+                    border: checked ? "1px solid #c7d2fe" : "1px solid #e5e7eb",
+                    borderRadius: "999px",
+                    padding: "0.3rem 0.55rem",
+                    cursor: "pointer",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleMonthVisible(m.date_key)}
+                    style={{ margin: 0 }}
+                  />
+                  <span style={{ fontSize: "0.85rem", color: "#374151" }}>{m.mois}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
 
         <div
           style={{
             overflow: "auto",
-            maxHeight: "calc(100vh - 250px)",
+            maxHeight: tableMaxHeight,
             border: "1px solid #e5e7eb",
             borderRadius: "0.5rem",
           }}
         >
+          {moisFiltres.length === 0 && (
+            <div style={{ padding: "1rem", color: "#9ca3af", textAlign: "center" }}>
+              Aucun mois sélectionné. Sélectionnez au moins un mois pour afficher le tableau.
+            </div>
+          )}
           <table
             style={{
               width: "100%",
               borderCollapse: "collapse",
-              fontSize: "0.875rem",
+              fontSize: tableFontSize,
+              tableLayout: "auto",
             }}
           >
             <thead
@@ -563,24 +687,24 @@ export default function EntreprisePage({
                     borderBottom: "2px solid #e5e7eb",
                     borderRight: "1px solid #e5e7eb",
                     fontWeight: "600",
-                    minWidth: "200px",
+                    minWidth: stickyColWidth,
                     zIndex: 11,
                   }}
                 >
                   Lot / Compte
                 </th>
-                {moisData.map((mois) => (
+                {moisFiltres.map((mois) => (
                   <th
                     key={mois.date_key}
                     style={{
-                      padding: "0.75rem",
+                      padding: cellPadding,
                       textAlign: "right",
                       borderBottom: "2px solid #e5e7eb",
                       fontWeight: "600",
                       whiteSpace: "nowrap",
                     }}
                   >
-                    {mois.mois}
+                     {mois.mois}
                   </th>
                 ))}
               </tr>
@@ -625,12 +749,12 @@ export default function EntreprisePage({
                             openExportLot(lot.lot);
                           }}
                           style={{
-                            padding: "0.25rem 0.5rem",
+                            padding: isWideTable ? "0.35rem 0.6rem" : "0.25rem 0.5rem",
                             background: "#f3e8ff",
                             color: "#6b21a8",
                             border: "1px solid #e9d5ff",
                             borderRadius: "0.35rem",
-                            fontSize: "0.8rem",
+                            fontSize: isWideTable ? "0.9rem" : "0.8rem",
                             cursor: "pointer",
                           }}
                         >
@@ -638,7 +762,7 @@ export default function EntreprisePage({
                         </button>
                       </div>
                     </td>
-                    {moisData.map((mois) => {
+                    {moisFiltres.map((mois) => {
                       const total = lot.total_par_mois.get(mois.date_key) || 0;
                       const statutStats = lot.statuts_par_mois.get(mois.date_key);
 
@@ -646,7 +770,7 @@ export default function EntreprisePage({
                         <td
                           key={mois.date_key}
                           style={{
-                            padding: "0.75rem",
+                            padding: cellPadding,
                             textAlign: "right",
                             fontWeight: "600",
                             borderBottom: "1px solid #e5e7eb",
@@ -685,7 +809,7 @@ export default function EntreprisePage({
                             position: "sticky",
                             left: 0,
                             background: "white",
-                            padding: "0.75rem 0.75rem 0.75rem 2.5rem",
+                            padding: `${cellPadding} ${cellPadding} ${cellPadding} ${isWideTable ? "2.5rem" : "1.75rem"}`,
                             borderRight: "1px solid #e5e7eb",
                             borderBottom: compteIdx === lot.comptes.length - 1 ? "2px solid #e5e7eb" : "1px solid #e5e7eb",
                             cursor: "pointer",
@@ -698,7 +822,7 @@ export default function EntreprisePage({
                             {compte.compte_num}
                           </div>
                         </td>
-                        {moisData.map((mois) => {
+                        {moisFiltres.map((mois) => {
                           const total = compte.montants_par_mois.get(mois.date_key) || 0;
                           const factures = compte.factures_par_mois.get(mois.date_key) || [];
 
@@ -712,7 +836,7 @@ export default function EntreprisePage({
                                 }
                               }}
                               style={{
-                                padding: "0.75rem",
+                                padding: cellPadding,
                                 textAlign: "right",
                                 borderBottom: compteIdx === lot.comptes.length - 1 ? "2px solid #e5e7eb" : "1px solid #e5e7eb",
                                 cursor: total > 0 ? "pointer" : "default",
@@ -852,7 +976,7 @@ export default function EntreprisePage({
                 gap: "0.35rem",
               }}
             >
-              {moisData.map((m) => (
+              {moisAffiches.map((m) => (
                 <label
                   key={m.date_key}
                   style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}
@@ -867,7 +991,7 @@ export default function EntreprisePage({
                   </span>
                 </label>
               ))}
-              {moisData.length === 0 && <div style={{ color: "#6b7280" }}>Aucun mois disponible.</div>}
+              {moisAffiches.length === 0 && <div style={{ color: "#6b7280" }}>Aucun mois disponible.</div>}
             </div>
             <div
               style={{

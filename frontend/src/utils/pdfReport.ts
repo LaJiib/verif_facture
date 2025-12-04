@@ -31,6 +31,9 @@ export interface FactureReportData {
   groupReals?: Record<string, { aboNet?: string; achat?: string }>;
   globalComment?: string;
   groupes: FactureGroupData[];
+  logoDataUrl?: string; // base64 (PNG/JPEG) du logo client à insérer dans l'en-tête
+  logoWidthMm?: number; // largeur souhaitée en mm (optionnel)
+  logoHeightMm?: number; // hauteur souhaitée en mm (optionnel)
 }
 
 export function exportFactureReportPdf(data: FactureReportData) {
@@ -57,14 +60,6 @@ export function exportFactureReportPdf(data: FactureReportData) {
     const parsed = new Date(date);
     return Number.isNaN(parsed.getTime()) ? date : parsed.toLocaleDateString("fr-FR");
   };
-  const now = new Date().toLocaleString("fr-FR", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-
   const statusBadge = (status?: string) => {
     const normalized = (status || "").toLowerCase();
     if (normalized.includes("valid")) return { label: "VALID\u00c9E", color: colors.success };
@@ -83,9 +78,16 @@ export function exportFactureReportPdf(data: FactureReportData) {
     doc.setFont("helvetica", "bold");
     doc.setFontSize(18);
     doc.text(data.entrepriseNom || "Entreprise", margin, 11);
-    doc.setFontSize(10);
-    doc.setFont("helvetica", "normal");
-    doc.text(now, pageWidth - margin, 11, { align: "right" as any });
+    // Logo en haut à droite si disponible (remplace la date/heure)
+    if (data.logoDataUrl) {
+      const targetHeight = data.logoHeightMm ?? 12;
+      const targetWidth = data.logoWidthMm ?? 0;
+      const height = targetHeight;
+      const width = targetWidth && targetWidth > 0 ? targetWidth : targetHeight * 1.8; // fallback ratio
+      const x = pageWidth - margin - width;
+      const y = 4;
+      doc.addImage(data.logoDataUrl, "PNG", x, y, width, height, undefined, "FAST");
+    }
     doc.setTextColor(30, 41, 59);
     doc.setFontSize(10);
   };
@@ -238,6 +240,7 @@ export function exportFactureReportPdf(data: FactureReportData) {
 
   if (groupeEntries.length > 0) {
     drawSectionTitle("Synthese par type / net unitaire");
+
     groupeEntries.forEach((entry) => {
       const aboBadge = statusBadge(entry.statuts.aboNet);
       const achatBadge = statusBadge(entry.statuts.achat);
@@ -264,7 +267,11 @@ export function exportFactureReportPdf(data: FactureReportData) {
       const aboBadgeX = pageWidth - margin - 90;
       const achatBadgeX = pageWidth - margin - 45;
       const badgeTop = currentY + 1.2;
+      const headerY = badgeTop - 0.8;
       const priceY = badgeTop + badgeHeight / 2 + 0.2;
+      doc.setFont("helvetica", "bold");
+      doc.text("Prix net unitaire HT", aboBadgeX - doc.getTextWidth("Prix net unitaire HT") - 3, headerY);
+      doc.text("Achat total HT", achatBadgeX - doc.getTextWidth("Achat total HT") - 3, headerY);
       doc.setFont("helvetica", "bold");
       doc.text(`${entry.netUnit.toFixed(2)} €`, aboBadgeX - doc.getTextWidth(`${entry.netUnit.toFixed(2)} €`) - 3, priceY);
       const achatLabelText = `${entry.achatTotal.toFixed(2)} €`;

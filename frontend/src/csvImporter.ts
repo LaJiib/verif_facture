@@ -579,28 +579,36 @@ const parseResult = Papa.parse<CSVRow>(csvText, {
     }
 
   // Copie du CSV vers le backend (stockage disque) - dédup côté API
-  try {
-    const dates = facturesAgregees.map(f => f.date).filter(Boolean);
-    const dateMin = dates.length ? dates.reduce((a, b) => (a < b ? a : b)) : "";
-    const dateMax = dates.length ? dates.reduce((a, b) => (a > b ? a : b)) : "";
-    console.log("[CSV Import] Dates CSV détectées pour stockage:", { dateMin, dateMax, count: dates.length });
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("entreprise_name", `entreprise_${entrepriseId}`);
-    formData.append("category", "import_manual");
-    if (dateMin) formData.append("date_min", dateMin);
-    if (dateMax) formData.append("date_max", dateMax);
-    const res = await fetch(`${API_BASE_URL}/uploads`, { method: "POST", body: formData });
-    if (res.ok) {
-      const payload = await res.json().catch(() => ({}));
-      currentUploadId = payload?.upload?.upload_id || null;
-      console.log("[CSV Import] Copie du CSV envoyée au backend (storage) upload_id=", currentUploadId);
-    } else {
-      console.warn("[CSV Import] Copie CSV non effectuée (HTTP)", res.status);
+    try {
+      const dates = facturesAgregees.map(f => f.date).filter(Boolean);
+      const dateMin = dates.length ? dates.reduce((a, b) => (a < b ? a : b)) : "";
+      const dateMax = dates.length ? dates.reduce((a, b) => (a > b ? a : b)) : "";
+      console.log("[CSV Import] Dates CSV détectées pour stockage:", { dateMin, dateMax, count: dates.length });
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("entreprise_name", `entreprise_${entrepriseId}`);
+      formData.append("category", "import_manual");
+      if (dateMin) formData.append("date_min", dateMin);
+      if (dateMax) formData.append("date_max", dateMax);
+      const res = await fetch(`${API_BASE_URL}/uploads`, { method: "POST", body: formData });
+      if (res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        currentUploadId = payload?.upload?.upload_id || null;
+        console.log("[CSV Import] Copie du CSV envoyée au backend (storage) upload_id=", currentUploadId);
+      } else {
+        console.warn("[CSV Import] Copie CSV non effectuée (HTTP)", res.status);
+      }
+    } catch (err) {
+      console.warn("[CSV Import] Copie CSV non effectuée:", err);
     }
-  } catch (err) {
-    console.warn("[CSV Import] Copie CSV non effectuée:", err);
-  }
+    if (!currentUploadId) {
+      const localId =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `local-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
+      currentUploadId = localId;
+      console.warn("[CSV Import] Aucun upload_id reçu, génération d'un identifiant local:", currentUploadId);
+    }
 
     // ========================================================================
     // ÉTAPE 4: TRAITEMENT PAR COMPTE DE FACTURATION
@@ -765,6 +773,15 @@ const parseResult = Papa.parse<CSVRow>(csvText, {
 
       // Vérifie si la facture existe déjà
       if (facturesSet.has(factureKey)) {
+        // Si facture existante sans csv_id, on l'attache au nouvel upload
+        const existing = facturesMap.get(factureKey);
+        if (existing && !existing.csv_id && currentUploadId) {
+          try {
+            await apiRequest<Facture>("PUT", `/factures/${existing.id}`, { csv_id: currentUploadId });
+          } catch (err) {
+            console.warn(`[CSV Import] Impossible d'attacher csv_id à la facture existante ${existing.id}`, err);
+          }
+        }
         result.stats.factures_doublons++;
         continue;
       }
