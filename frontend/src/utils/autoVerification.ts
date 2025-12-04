@@ -133,7 +133,6 @@ export async function autoVerifyFacture(
   console.log("[Auto] Paramètres autoVerifyFacture", {
     facture_id: facture?.facture_id,
     ecart: facture?.ecart,
-    achat: facture?.achat,
     csv_rows: csvRowsAllCurrent?.length || 0,
     current_access_keys: currentRowsByAccess ? Object.keys(currentRowsByAccess).length : 0,
     ref_access_keys: refRowsByAccess ? Object.keys(refRowsByAccess).length : 0,
@@ -157,17 +156,6 @@ export async function autoVerifyFacture(
     metricReals.ecart = safeEcart.toFixed(2);
   }
 
-  // 2) Achats globaux
-  const safeAchat = safeNumber(facture?.achat);
-  metricStatuts.achat = safeAchat === 0 ? "valide" : "conteste";
-  if (safeAchat !== 0) {
-    metricComments.achat = `Achat(s) détecté(s): ${safeAchat.toFixed(2)} €`;
-    metricReals.achat = safeAchat.toFixed(2);
-  }
-
-  // 3) Conso globale (par défaut à vérifier)
-  metricStatuts.conso = "a_verifier";
-
   // 4) Groupes (aboNet/achat)
   const prevNetByLine: Record<number, number> = {};
   prevLignes.forEach((l) => (prevNetByLine[l.ligne_id] = safeNumber(l.abo) + safeNumber(l.remises)));
@@ -180,7 +168,12 @@ export async function autoVerifyFacture(
     let aboComment = "";
     let aboReal: string | undefined;
 
-    const lignesGroupe = detailLignes.filter((l) => l.ligne_type === g.ligne_type);
+    // Restreint aux lignes réellement dans le groupe (type + prix net proche)
+    const lignesGroupe = detailLignes.filter((l) => {
+      if (l.ligne_type !== g.ligne_type) return false;
+      const net = safeNumber(l.abo) + safeNumber(l.remises);
+      return Math.abs(net - prix) < 0.01;
+    });
     lignesGroupe.forEach((l) => {
       const prevNet = prevNetByLine[l.ligne_id];
       const currNet = safeNumber(l.abo) + safeNumber(l.remises);

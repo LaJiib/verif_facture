@@ -362,12 +362,13 @@ function categorizeMontant(ligne: LigneData): "abo" | "conso" | "achat" | "remis
   // 1) Utiliser la rubrique pour déterminer la famille principale
   let base: "abo" | "conso" | "achat" | null = null;
   if (rubrique) {
-    if (/forfait|formule|option|abonnement|offre/.test(rubrique)) {
-      base = "abo";
-    } else if (/conso|consommation|usage|trafic/.test(rubrique)) {
+    // Priorise les consos même si le libellé contient aussi "forfait" (ex: "consommation hors forfait")
+    if (/conso|consommation|usage|trafic/.test(rubrique)) {
       base = "conso";
     } else if (/achat|terminaux|accessoires|equipement|appareil|device|services?\s+ponctuels?/.test(rubrique)) {
       base = "achat";
+    } else if (/forfait|formule|option|abonnement|offre/.test(rubrique)) {
+      base = "abo";
     }
   }
 

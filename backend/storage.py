@@ -20,10 +20,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from .config import UPLOAD_DIR
+
 logger = logging.getLogger("storage")
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-UPLOAD_ROOT = PROJECT_ROOT / "data" / "uploads"
+UPLOAD_ROOT = UPLOAD_DIR
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
 _SAFE_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")

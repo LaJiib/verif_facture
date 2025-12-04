@@ -10,6 +10,11 @@ if (-not (Test-Path $python)) {
     $python = "python"
 }
 
+$env:VERIF_FACTURE_DATA_DIR = Join-Path $repoRoot "data"
+if (-not (Test-Path $env:VERIF_FACTURE_DATA_DIR)) {
+    New-Item -ItemType Directory -Force -Path $env:VERIF_FACTURE_DATA_DIR | Out-Null
+}
+
 $backendCmd = "$python -m uvicorn backend.api:app --reload --port 8000 --log-level warning"
 $frontendCmd = "npm run dev -- --host --port 5173"
 

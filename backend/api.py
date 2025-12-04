@@ -19,11 +19,14 @@ import io
 import unicodedata
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 import requests
 
+from .config import DATABASE_URL
 from .models import Base, Entreprise, Compte, Ligne, Facture, LigneFacture, FactureReport
 from .storage import list_uploads, delete_upload, delete_uploads_for_entreprise, store_csv_file, StorageError, load_upload_bytes, get_upload
 
@@ -35,8 +38,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration de la base de données
-DB_PATH = Path(__file__).parent / "invoices.db"
-DATABASE_URL = f"sqlite:///{DB_PATH}"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -44,6 +45,31 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Vérification Factures Télécom")
+
+# Dossier frontend (copie de frontend/dist)
+STATIC_DIR = Path(__file__).parent / "static"
+ASSETS_DIR = STATIC_DIR / "assets"
+if ASSETS_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
+
+# Favicon
+@app.get("/logo.ico")
+def favicon():
+    favicon_path = STATIC_DIR / "logo.ico"
+    if favicon_path.exists():
+        return FileResponse(favicon_path)
+    raise HTTPException(status_code=404, detail="favicon not found")
+
+# Page d'accueil: sert le frontend compilé s'il est présent
+@app.get("/", response_class=HTMLResponse)
+def serve_frontend():
+    index_path = STATIC_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(index_path)
+    return HTMLResponse(
+        "<h1>Frontend non disponible</h1><p>Compilez le frontend puis copiez frontend/dist vers backend/static.</p>",
+        status_code=503,
+    )
 
 # CORS
 app.add_middleware(
@@ -886,6 +912,9 @@ def auto_verif_groupe(facture_id: int, payload: GroupeCheckPayload, db: Session 
         return abs(unit - float(target)) < 0.01
 
     curr_rows = [(lf, l) for lf, l in curr_rows_all if matches_price(lf, payload.prix_abo)]
+    # Si le filtre par prix exclut tout, on tombe en mode large (toutes les lignes du type)
+    if payload.prix_abo is not None and len(curr_rows) == 0:
+        curr_rows = curr_rows_all
     curr_map = {l.id: {"lf": lf, "ligne": l} for lf, l in curr_rows}
     curr_total_ht = sum(float(lf.total_ht or 0) for lf, _ in curr_rows)
     curr_count = len(curr_rows)
@@ -908,6 +937,8 @@ def auto_verif_groupe(facture_id: int, payload: GroupeCheckPayload, db: Session 
             .all()
         )
         prev_rows = [(lf, l) for lf, l in prev_rows_all if matches_price(lf, payload.prix_abo)]
+        if payload.prix_abo is not None and len(prev_rows) == 0:
+            prev_rows = prev_rows_all
         prev_map = {l.id: {"lf": lf, "ligne": l} for lf, l in prev_rows}
         has_reference = True
     else:

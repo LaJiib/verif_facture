@@ -231,7 +231,7 @@ export default function CompteDetailModal({
       };
       const metricComments = { ...(factureMetricComments[factureCourante.facture_id] || {}), ecart: resEcart.commentaire || "" };
       const metricReals = {} as { ecart?: string };
-      metricReals.ecart = factureCourante.ecart.toFixed(2);
+      metricReals.ecart = Number(factureCourante.ecart ?? 0).toFixed(2);
 
       // 2) Analyse par type : prefill statuts/commentaires (CSV + reference)
       const groupStatuts: Record<string, { aboNet: StatutValeur; achat: StatutValeur }> = {};
@@ -239,15 +239,22 @@ export default function CompteDetailModal({
       const groupReals: Record<string, { aboNet?: string; achat?: string }> = {};
 
       for (const g of ligneGroupesFacture) {
-        const netUnitVal = g.count ? g.netAbo / g.count : 0;
-        const key = `${g.ligne_type}|${netUnitVal.toFixed(2)}`;
+        const netUnitVal = g.count ? g.netAbo / g.count : Number(g.netAbo ?? 0);
+        const key = `${g.ligne_type}|${Number(netUnitVal || 0).toFixed(2)}`;
         try {
           const resG = await autoVerifyGroupe(factureCourante.facture_id, { ligne_type: g.ligne_type, prix_abo: netUnitVal });
+          console.log("[Auto][Groupe] Reponse", {
+            key,
+            ligne_type: g.ligne_type,
+            net_unit: netUnitVal,
+            achat: g.achat,
+            res: resG,
+          });
           groupStatuts[key] = {
             aboNet: resG.statut as StatutValeur,
             achat: g.achat && g.achat !== 0 ? "conteste" : "valide",
           };
-          const achatComment = g.achat && g.achat !== 0 ? `Achats détectés: ${g.achat.toFixed(2)} €` : "";
+          const achatComment = g.achat && g.achat !== 0 ? `Achats détectés: ${Number(g.achat || 0).toFixed(2)} €` : "";
           const summarizedContexts = summarizeCsvContexts(resG.csv_context);
           const baseComments = [resG.commentaire, ...summarizedContexts, achatComment].filter(Boolean);
           groupComments[key] = {
@@ -270,6 +277,14 @@ export default function CompteDetailModal({
       setFactureGroupStatuts((prev) => ({ ...prev, [factureCourante.facture_id]: groupStatuts }));
       setFactureGroupComments((prev) => ({ ...prev, [factureCourante.facture_id]: groupComments }));
       setFactureGroupReals((prev) => ({ ...prev, [factureCourante.facture_id]: groupReals }));
+      console.log("[Auto] Résumé calculé", {
+        facture_id: factureCourante.facture_id,
+        metricStatuts,
+        metricComments,
+        groupStatuts,
+        groupComments,
+        groupReals,
+      });
       alert("Auto (CSV) terminée : statuts et commentaires pré-remplis.");
 
     } catch (err) {
@@ -594,9 +609,9 @@ export default function CompteDetailModal({
 
   const lignesGroupes: LigneGroupeSynthese[] = Object.values(
     detailLignes.reduce((acc, ligne) => {
-      const typeLabel = decodeLineType(ligne.ligne_type);
-      const prixAbo = Number(ligne.abo.toFixed(2));
-      const key = `${typeLabel}|${prixAbo}`;
+        const typeLabel = decodeLineType(ligne.ligne_type);
+        const prixAbo = Number(Number(ligne.abo || 0).toFixed(2));
+        const key = `${typeLabel}|${prixAbo}`;
       if (!acc[key]) {
         acc[key] = {
           type: typeLabel,
@@ -1062,9 +1077,9 @@ export default function CompteDetailModal({
                         Total HT
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                        <div style={{ fontSize: "1.5rem", fontWeight: "bold" }}>
-                          {statsGlobales.total_ht.toFixed(2)} €
-                        </div>
+                          <div style={{ fontSize: "1.5rem", fontWeight: "bold" }}>
+                          {Number(statsGlobales.total_ht || 0).toFixed(2)} € 
+                          </div>
                         {mois && (
                           <VariationBadge current={statsGlobales.total_ht} previous={prevStatsGlobales?.total_ht} />
                         )}
@@ -1082,9 +1097,9 @@ export default function CompteDetailModal({
                         Abonnements
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                        <div style={{ fontSize: "1.5rem", fontWeight: "bold" }}>
-                          {statsGlobales.total_abo.toFixed(2)} €
-                        </div>
+                          <div style={{ fontSize: "1.5rem", fontWeight: "bold" }}>
+                          {Number(statsGlobales.total_abo || 0).toFixed(2)} € 
+                          </div>
                         {mois && (
                           <VariationBadge current={statsGlobales.total_abo} previous={prevStatsGlobales?.total_abo} />
                         )}
@@ -1102,9 +1117,9 @@ export default function CompteDetailModal({
                         Consommations
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                        <div style={{ fontSize: "1.5rem", fontWeight: "bold" }}>
-                          {statsGlobales.total_conso.toFixed(2)} €
-                        </div>
+                          <div style={{ fontSize: "1.5rem", fontWeight: "bold" }}>
+                          {Number(statsGlobales.total_conso || 0).toFixed(2)} € 
+                          </div>
                         {mois && (
                           <VariationBadge current={statsGlobales.total_conso} previous={prevStatsGlobales?.total_conso} />
                         )}
@@ -1122,9 +1137,9 @@ export default function CompteDetailModal({
                         Achats
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                        <div style={{ fontSize: "1.5rem", fontWeight: "bold" }}>
-                          {statsGlobales.total_achat.toFixed(2)} €
-                        </div>
+                          <div style={{ fontSize: "1.5rem", fontWeight: "bold" }}>
+                          {Number(statsGlobales.total_achat || 0).toFixed(2)} € 
+                          </div>
                         {mois && (
                           <VariationBadge current={statsGlobales.total_achat} previous={prevStatsGlobales?.total_achat} />
                         )}
@@ -1142,9 +1157,9 @@ export default function CompteDetailModal({
                         Remises
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                        <div style={{ fontSize: "1.5rem", fontWeight: "bold" }}>
-                          {statsGlobales.total_remises.toFixed(2)} €
-                        </div>
+                          <div style={{ fontSize: "1.5rem", fontWeight: "bold" }}>
+                          {Number(statsGlobales.total_remises || 0).toFixed(2)} € 
+                          </div>
                         {mois && (
                           <VariationBadge current={statsGlobales.total_remises} previous={prevStatsGlobales?.total_remises} />
                         )}
@@ -1167,8 +1182,8 @@ export default function CompteDetailModal({
                           <div key={item.label}>
                             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.25rem" }}>
                               <span style={{ fontSize: "0.875rem", color: "#374151" }}>{item.label}</span>
-                              <span style={{ fontSize: "0.875rem", fontWeight: "600" }}>
-                                {item.value.toFixed(2)} € ({percentage.toFixed(1)}%)
+                                <span style={{ fontSize: "0.875rem", fontWeight: "600" }}>
+                                {Number(item.value || 0).toFixed(2)} € ({Number(percentage || 0).toFixed(1)}%)
                               </span>
                             </div>
                             <div
@@ -1243,21 +1258,21 @@ export default function CompteDetailModal({
                                 {decodeFactureStatus(facture.facture_statut)}
                                   </span>
                                 </td>
-                            <td style={{ padding: "0.75rem", textAlign: "right" }}>
-                              {facture.abo.toFixed(2)} €
-                            </td>
-                            <td style={{ padding: "0.75rem", textAlign: "right" }}>
-                              {facture.conso.toFixed(2)} €
-                            </td>
-                            <td style={{ padding: "0.75rem", textAlign: "right", color: "#14b8a6" }}>
-                              {facture.remises.toFixed(2)} €
-                            </td>
-                            <td style={{ padding: "0.75rem", textAlign: "right", color: "#ef4444" }}>
-                              {facture.achat.toFixed(2)} €
-                            </td>
-                            <td style={{ padding: "0.75rem", textAlign: "right", fontWeight: "600" }}>
-                              {facture.total_ht.toFixed(2)} €
-                            </td>
+                              <td style={{ padding: "0.75rem", textAlign: "right" }}>
+                              {Number(facture.abo || 0).toFixed(2)} € 
+                              </td>
+                              <td style={{ padding: "0.75rem", textAlign: "right" }}>
+                              {Number(facture.conso || 0).toFixed(2)} € 
+                              </td>
+                              <td style={{ padding: "0.75rem", textAlign: "right", color: "#14b8a6" }}>
+                              {Number(facture.remises || 0).toFixed(2)} € 
+                              </td>
+                              <td style={{ padding: "0.75rem", textAlign: "right", color: "#ef4444" }}>
+                              {Number(facture.achat || 0).toFixed(2)} € 
+                              </td>
+                              <td style={{ padding: "0.75rem", textAlign: "right", fontWeight: "600" }}>
+                              {Number(facture.total_ht || 0).toFixed(2)} € 
+                              </td>
                           </tr>
                         ))}
                         {detailFactures.length === 0 && (
@@ -1416,7 +1431,7 @@ export default function CompteDetailModal({
                             </td>
                             <td style={{ padding: "0.75rem", textAlign: "right" }}>
                               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "0.15rem" }}>
-                                <span>{ligne.abo.toFixed(2)} €</span>
+                                 <span>{Number(ligne.abo || 0).toFixed(2)} €</span>
                                 {mois && (
                                   <VariationBadge
                                     current={ligne.abo}
@@ -1427,7 +1442,7 @@ export default function CompteDetailModal({
                             </td>
                             <td style={{ padding: "0.75rem", textAlign: "right" }}>
                               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "0.15rem" }}>
-                                <span>{ligne.conso.toFixed(2)} €</span>
+                                 <span>{Number(ligne.conso || 0).toFixed(2)} €</span>
                                 {mois && (
                                   <VariationBadge
                                     current={ligne.conso}
@@ -1438,7 +1453,7 @@ export default function CompteDetailModal({
                             </td>
                             <td style={{ padding: "0.75rem", textAlign: "right", color: "#14b8a6" }}>
                               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "0.15rem", color: "#14b8a6" }}>
-                                <span>{ligne.remises.toFixed(2)} €</span>
+                                 <span>{Number(ligne.remises || 0).toFixed(2)} €</span>
                                 {mois && (
                                   <VariationBadge
                                     current={ligne.remises}
@@ -1449,7 +1464,7 @@ export default function CompteDetailModal({
                             </td>
                             <td style={{ padding: "0.75rem", textAlign: "right", color: "#ef4444" }}>
                               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "0.15rem", color: "#ef4444" }}>
-                                <span>{ligne.achat.toFixed(2)} €</span>
+                                 <span>{Number(ligne.achat || 0).toFixed(2)} €</span>
                                 {mois && (
                                   <VariationBadge
                                     current={ligne.achat}
@@ -1460,7 +1475,7 @@ export default function CompteDetailModal({
                             </td>
                             <td style={{ padding: "0.75rem", textAlign: "right", fontWeight: "600" }}>
                               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "0.15rem" }}>
-                                <span>{ligne.total_ht.toFixed(2)} €</span>
+                                 <span>{Number(ligne.total_ht || 0).toFixed(2)} €</span>
                                 {mois && (
                                   <VariationBadge
                                     current={ligne.total_ht}
@@ -1550,10 +1565,10 @@ export default function CompteDetailModal({
                                 <div style={{ fontSize: "0.85rem", color: "#6b7280" }}>{f.facture_date}</div>
                               </div>
                               <div style={{ textAlign: "right" }}>
-                                <div style={{ fontWeight: 700 }}>{f.facture_total.toFixed(2)} €</div>
+                                 <div style={{ fontWeight: 700 }}>{Number(f.facture_total || 0).toFixed(2)} €</div>
                                 <div style={{ color: Math.abs(f.ecart) > 0.05 ? "#dc2626" : "#16a34a", fontSize: "0.85rem" }}>
                                   {f.ecart >= 0 ? "+" : ""}
-                                  {f.ecart.toFixed(2)} €
+                                   {Number(f.ecart || 0).toFixed(2)} € 
                                 </div>
                               </div>
                             </button>
@@ -1574,7 +1589,7 @@ export default function CompteDetailModal({
                               {factureCourante.facture_date} · Ecart facture - lignes :{" "}
                               <span style={{ color: Math.abs(factureCourante.ecart) > 0.05 ? "#dc2626" : "#16a34a", fontWeight: 700 }}>
                                 {factureCourante.ecart >= 0 ? "+" : ""}
-                                {factureCourante.ecart.toFixed(2)} €
+                                  {Number(factureCourante.ecart || 0).toFixed(2)} € 
                               </span>
                             </p>
                           </div>
@@ -1632,17 +1647,17 @@ export default function CompteDetailModal({
                           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "0.75rem" }}>
                             <div style={{ background: "#eff6ff", borderRadius: "0.55rem", padding: "0.75rem" }}>
                               <div style={{ color: "#1d4ed8", fontSize: "0.9rem", fontWeight: 700 }}>Total facture HT</div>
-                              <div style={{ fontSize: "1.15rem", fontWeight: 800 }}>{factureCourante.facture_total.toFixed(2)} €</div>
+                              <div style={{ fontSize: "1.15rem", fontWeight: 800 }}>{Number(factureCourante.facture_total || 0).toFixed(2)} €</div>
                             </div>
                             <div style={{ background: "#f0fdf4", borderRadius: "0.55rem", padding: "0.75rem" }}>
                               <div style={{ color: "#166534", fontSize: "0.9rem", fontWeight: 700 }}>Total lignes HT</div>
-                              <div style={{ fontSize: "1.15rem", fontWeight: 800 }}>{totalLignesFactureHt.toFixed(2)} €</div>
+                              <div style={{ fontSize: "1.15rem", fontWeight: 800 }}>{Number(totalLignesFactureHt || 0).toFixed(2)} €</div>
                             </div>
                             <div style={{ background: "#fff7ed", borderRadius: "0.55rem", padding: "0.75rem" }}>
                               <div style={{ color: "#c2410c", fontSize: "0.9rem", fontWeight: 700 }}>Ecart facture - lignes</div>
                               <div style={{ fontSize: "1.15rem", fontWeight: 800, color: Math.abs(factureCourante.ecart) > 0.05 ? "#dc2626" : "#16a34a" }}>
                                 {factureCourante.ecart >= 0 ? "+" : ""}
-                                {factureCourante.ecart.toFixed(2)} €
+                                  {Number(factureCourante.ecart || 0).toFixed(2)} € 
                               </div>
                             </div>
                           </div>
@@ -1706,9 +1721,9 @@ export default function CompteDetailModal({
                               </thead>
                               <tbody>
                                 {ligneGroupesFacture.map((g, idx) => {
-                                  const netUnitVal = g.count ? g.netAbo / g.count : 0;
-                                  const achatUnit = g.count ? g.achat / g.count : g.achat;
-                                  const key = `${g.ligne_type}|${netUnitVal.toFixed(2)}`;
+                                    const netUnitVal = g.count ? g.netAbo / g.count : Number(g.netAbo ?? 0);
+                                    const achatUnit = g.count ? g.achat / g.count : Number(g.achat ?? 0);
+                                    const key = `${g.ligne_type}|${Number(netUnitVal || 0).toFixed(2)}`;
                                   const stat = factureGroupStatuts[factureCourante.facture_id]?.[key];
                                   const comment = factureGroupComments[factureCourante.facture_id]?.[key]?.aboNet || "";
                                   const commentAchat = factureGroupComments[factureCourante.facture_id]?.[key]?.achat || "";
@@ -1719,10 +1734,10 @@ export default function CompteDetailModal({
                                         <div style={{ fontWeight: 700 }}>{decodeLineType(g.ligne_type)}</div>
                                       </td>
                                       <td style={{ padding: "0.65rem", textAlign: "right", fontWeight: 700 }}>{g.count}</td>
-                                      <td style={{ padding: "0.65rem", textAlign: "right" }}>{g.abo.toFixed(2)} €</td>
-                                      <td style={{ padding: "0.65rem", textAlign: "right" }}>{g.conso.toFixed(2)} €</td>
-                                      <td style={{ padding: "0.65rem", textAlign: "right", color: "#0f766e" }}>{g.remises.toFixed(2)} €</td>
-                                      <td style={{ padding: "0.65rem", textAlign: "right", fontWeight: 700, color: "#0f172a" }}>{netUnitVal.toFixed(2)} €</td>
+                                       <td style={{ padding: "0.65rem", textAlign: "right" }}>{Number(g.abo || 0).toFixed(2)} €</td>
+                                       <td style={{ padding: "0.65rem", textAlign: "right" }}>{Number(g.conso || 0).toFixed(2)} €</td>
+                                       <td style={{ padding: "0.65rem", textAlign: "right", color: "#0f766e" }}>{Number(g.remises || 0).toFixed(2)} €</td>
+                                       <td style={{ padding: "0.65rem", textAlign: "right", fontWeight: 700, color: "#0f172a" }}>{Number(netUnitVal || 0).toFixed(2)} €</td>
                                       <td style={{ padding: "0.65rem", minWidth: "240px" }}>
                                         <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
                                           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
@@ -1745,12 +1760,12 @@ export default function CompteDetailModal({
                                           />
                                         </div>
                                       </td>
-                                      <td style={{ padding: "0.65rem", textAlign: "right", fontWeight: 700, color: "#b45309" }}>{g.achat.toFixed(2)} €</td>
+                                       <td style={{ padding: "0.65rem", textAlign: "right", fontWeight: 700, color: "#b45309" }}>{Number(g.achat || 0).toFixed(2)} €</td>
                                       <td style={{ padding: "0.65rem", minWidth: "240px" }}>
                                         <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
                                           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
                                             <StatutBadge value={stat?.achat || (g.achat && g.achat !== 0 ? "conteste" : "a_verifier")} />
-                                            <span style={{ color: "#6b7280", fontSize: "0.82rem" }}>Net unitaire: {achatUnit.toFixed(2)} €</span>
+                                             <span style={{ color: "#6b7280", fontSize: "0.82rem" }}>Net unitaire: {Number(achatUnit || 0).toFixed(2)} €</span>
                                             <select
                                               value={stat?.achat || (g.achat && g.achat !== 0 ? "conteste" : "a_verifier")}
                                               onChange={(e) => updateGroupStatut(factureCourante.facture_id, key, "achat", e.target.value as StatutValeur)}
