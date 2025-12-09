@@ -39,6 +39,7 @@ interface Facture {
   achat: number;
   statut: number; // 0=importe,1=valide,2=conteste
   total_ht: number;
+  csv_id?: string | null;
 }
 
 interface LigneFacture {

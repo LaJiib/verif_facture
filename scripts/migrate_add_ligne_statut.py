@@ -10,6 +10,9 @@ Usage (PowerShell) :
 
 from pathlib import Path
 import sqlite3
+import shutil
+import datetime
+import sys
 
 try:
     # Utilise la même résolution de chemin que le backend (AppData/VerifFacture/data/invoices.db par défaut)
@@ -44,7 +47,22 @@ def table_exists(cur: sqlite3.Cursor, table: str) -> bool:
 
 
 def main():
-    db_path = find_db()
+    default_db = find_db()
+    # Permet un chemin passé en argument (utilisé par le setup), sinon prend le chemin détecté
+    arg_path = Path(sys.argv[1]) if len(sys.argv) >= 2 else None
+    db_path = arg_path if arg_path else default_db
+
+    if not db_path.exists():
+        raise SystemExit(f"Base introuvable: {db_path}")
+
+    # Sauvegarde de sécurité
+    backup_path = db_path.with_suffix(f".backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    try:
+        shutil.copy2(db_path, backup_path)
+        print(f"[BACKUP] Copie de sécurité créée: {backup_path}")
+    except Exception as exc:
+        print(f"[WARN] Impossible de créer la sauvegarde ({exc}), migration interrompue.")
+        return
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 

@@ -84,6 +84,12 @@ const keyValRow = (label: string, value: Paragraph | string) =>
 export async function exportFactureReportDocx(data: FactureReportData) {
   const factureStatus = statusLabel(data.factureStatut?.toString());
   const ecartStatus = statusLabel(data.metricStatuts.ecart);
+  const ecartRealRaw = data.metricReals?.ecart;
+  const ecartReal =
+    ecartRealRaw !== undefined && ecartRealRaw !== null && `${ecartRealRaw}`.trim() !== ""
+      ? Number(ecartRealRaw)
+      : null;
+  const ecartValue = ecartReal !== null && !Number.isNaN(ecartReal) ? ecartReal : data.ecart;
   const dateStr = new Date().toLocaleString("fr-FR");
 
   const headerTable = new Table({
@@ -117,22 +123,31 @@ export async function exportFactureReportDocx(data: FactureReportData) {
     ],
   });
 
+  const factureRows = [
+    keyValRow("Compte de facturation", `${data.compteNum}${data.compteNom ? ` - ${data.compteNom}` : ""}`),
+    keyValRow("Numéro de facture", `${data.factureNum || data.factureId}`),
+    keyValRow("Date d'émission", data.factureDate || ""),
+    keyValRow("Statut de la facture", chip(chipColor(factureStatus))),
+    keyValRow("Ecart facture / lignes", `${data.ecart.toFixed(2)} €`),
+  ];
+  if (ecartReal !== null && !Number.isNaN(ecartReal)) {
+    factureRows.push(keyValRow("Ecart corrigé (contestation)", `${ecartValue.toFixed(2)} €`));
+  }
+  factureRows.push(keyValRow("Achats", `${data.achat.toFixed(2)} €`));
+
   const factureTable = new Table({
     width: { size: 100, type: WidthType.PERCENTAGE },
     borders: emptyBorders,
-    rows: [
-      keyValRow("Compte de facturation", `${data.compteNum}${data.compteNom ? ` - ${data.compteNom}` : ""}`),
-      keyValRow("Numéro de facture", `${data.factureNum || data.factureId}`),
-      keyValRow("Date d'émission", data.factureDate || ""),
-      keyValRow("Statut de la facture", chip(chipColor(factureStatus))),
-      keyValRow("Ecart facture / lignes", `${data.ecart.toFixed(2)} €`),
-      keyValRow("Achats", `${data.achat.toFixed(2)} €`),
-    ],
+    rows: factureRows,
   });
 
+  const ecartMontantLabel =
+    ecartReal !== null && !Number.isNaN(ecartReal)
+      ? `${ecartValue.toFixed(2)} € (initial : ${data.ecart.toFixed(2)} €)`
+      : `${data.ecart.toFixed(2)} €`;
   const resultatRows = [
     keyValRow("Statut ecart", chip(chipColor(ecartStatus))),
-    keyValRow("Montant ecart", `${data.ecart.toFixed(2)} €`),
+    keyValRow("Montant ecart", ecartMontantLabel),
   ];
   if (data.metricComments?.ecart) {
     resultatRows.push(keyValRow("Commentaire ecart", data.metricComments.ecart));

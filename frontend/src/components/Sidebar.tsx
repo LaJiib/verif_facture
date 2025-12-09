@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { shutdownBackend } from "../newApi";
 
 interface SidebarProps {
   currentEntrepriseId: number | null;
@@ -18,6 +19,7 @@ export default function Sidebar({
   onNavigateToImport,
 }: SidebarProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [quitting, setQuitting] = useState(false);
 
   return (
     <>
@@ -223,6 +225,42 @@ export default function Sidebar({
               }}
             >
               ⚙️ Paramètres
+            </button>
+
+            <button
+              onClick={async () => {
+                if (quitting) return;
+                try {
+                  setQuitting(true);
+                  await shutdownBackend();
+                  setTimeout(() => {
+                    window.close();
+                  }, 500);
+                } catch (err) {
+                  alert("Impossible de fermer l'application : " + (err as Error).message);
+                } finally {
+                  setQuitting(false);
+                }
+              }}
+              style={{
+                background: "#fee2e2",
+                color: "#b91c1c",
+                border: "1px solid #fecdd3",
+                borderRadius: "0.375rem",
+                padding: "0.75rem",
+                cursor: "pointer",
+                textAlign: "left",
+                fontSize: "0.875rem",
+                transition: "background 0.15s",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "#fecdd3";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "#fee2e2";
+              }}
+            >
+              {quitting ? "Fermeture..." : "Quitter l'application"}
             </button>
           </div>
         </div>

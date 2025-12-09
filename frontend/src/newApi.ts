@@ -69,6 +69,39 @@ export async function fetchUploadContent(uploadId: string): Promise<string> {
   return res.text();
 }
 
+// ============================================================================
+// Configuration (chemin DB)
+// ============================================================================
+
+export interface DbPathConfig {
+  db_path: string;
+  default_db_path: string;
+  configured_db_path: string | null;
+  source: "env" | "config" | "default" | string;
+  message?: string;
+}
+
+export interface DbPathSaveResponse {
+  saved_db_path: string | null;
+  uses_default: boolean;
+  requires_restart: boolean;
+  message?: string;
+}
+
+export async function fetchDbPathConfig(): Promise<DbPathConfig> {
+  return handleResponse<DbPathConfig>(await fetch(`${API_BASE_URL}/config/db-path`));
+}
+
+export async function saveDbPathConfig(dbPath: string | null): Promise<DbPathSaveResponse> {
+  return handleResponse<DbPathSaveResponse>(
+    await fetch(`${API_BASE_URL}/config/db-path`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ db_path: dbPath }),
+    })
+  );
+}
+
 // LLM local (Ollama)
 export async function summarizeWithLlm(texts: string[], system?: string): Promise<string> {
   console.log("[LLM] summarize request", {
@@ -136,6 +169,14 @@ export interface LigneFacture {
   achat: number;
   statut: number;
   total_ht: number;
+}
+
+export async function shutdownBackend(): Promise<void> {
+  const res = await fetch(`${API_BASE_URL}/shutdown`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(body || "Impossible d'arrêter le backend");
+  }
 }
 
 export async function listLignesFactures(params?: { facture_id?: number; ligne_id?: number }): Promise<LigneFacture[]> {

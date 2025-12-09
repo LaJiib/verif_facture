@@ -17,7 +17,10 @@ import logging
 import csv
 import io
 import unicodedata
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Response
+import os
+import time
+import threading
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
@@ -26,7 +29,14 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 import requests
 
-from .config import DATABASE_URL
+from .config import (
+    DATABASE_URL,
+    DB_PATH,
+    DEFAULT_DB_PATH,
+    DB_PATH_SOURCE,
+    CONFIG_DB_PATH,
+    persist_db_path,
+)
 from .models import Base, Entreprise, Compte, Ligne, Facture, LigneFacture, FactureReport
 from .storage import list_uploads, delete_upload, delete_uploads_for_entreprise, store_csv_file, StorageError, load_upload_bytes, get_upload
 
@@ -750,6 +760,10 @@ class GroupeCheckPayload(BaseModel):
     prix_abo: Optional[float] = None
 
 
+class DbPathPayload(BaseModel):
+    db_path: Optional[str] = None
+
+
 def _build_group_stats(db: Session, facture_obj: Facture, rows_map: Optional[Dict[str, Any]] = None) -> Dict[tuple, Dict[str, Any]]:
     stats: Dict[tuple, Dict[str, Any]] = {}
     lf_rows = (
@@ -1297,6 +1311,21 @@ def root():
     return {"status": "ok", "message": "API Vérification Factures Télécom"}
 
 
+@app.post("/shutdown")
+def shutdown(request: Request):
+    """Arrête le backend (réservé aux appels locaux)."""
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "localhost", "::1"):
+        raise HTTPException(status_code=403, detail="Shutdown uniquement depuis localhost")
+
+    def _stop():
+        time.sleep(0.2)
+        os._exit(0)
+
+    threading.Thread(target=_stop, daemon=True).start()
+    return {"message": "Arrêt en cours"}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
@@ -1345,3 +1374,35 @@ def upload_csv(
     except Exception as exc:  # pragma: no cover - defensive
         logger.error("Erreur stockage CSV: %s", exc)
         raise HTTPException(status_code=500, detail="Erreur stockage CSV")
+
+
+# ============================================================================
+# CONFIGURATION (chemin base de données)
+# ============================================================================
+
+
+@app.get("/config/db-path")
+def get_db_path_config():
+    """Retourne le chemin DB utilisé et la source (env/config/default)."""
+    return {
+        "db_path": str(DB_PATH),
+        "default_db_path": str(DEFAULT_DB_PATH),
+        "configured_db_path": str(CONFIG_DB_PATH) if CONFIG_DB_PATH else None,
+        "source": DB_PATH_SOURCE,
+        "message": "Le changement de chemin nécessite un redémarrage complet de l'application.",
+    }
+
+
+@app.post("/config/db-path")
+def set_db_path_config(payload: DbPathPayload):
+    """Enregistre un nouveau chemin DB dans le fichier config (persistance utilisateur).
+
+    Le backend doit être relancé pour que le nouveau chemin soit pris en compte.
+    """
+    new_path, saved = persist_db_path(payload.db_path)
+    return {
+        "saved_db_path": str(new_path) if new_path else None,
+        "uses_default": not saved,
+        "requires_restart": True,
+        "message": "Chemin enregistré. Redémarrez l'application pour appliquer la nouvelle base.",
+    }

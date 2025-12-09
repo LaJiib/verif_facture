@@ -26,6 +26,7 @@ export interface FactureReportData {
   achat: number;
   metricStatuts: { ecart?: string; achat?: string };
   metricComments?: { ecart?: string; achat?: string };
+  metricReals?: { ecart?: string; achat?: string };
   groupStatuts: Record<string, FactureGroupStatut>;
   groupComments: Record<string, { aboNet?: string; achat?: string }>;
   groupReals?: Record<string, { aboNet?: string; achat?: string }>;
@@ -70,6 +71,12 @@ export function exportFactureReportPdf(data: FactureReportData) {
   const factureStatus = statusBadge(decodeFactureStatus(data.factureStatut || 0));
   const ecartStatus = statusBadge(data.metricStatuts.ecart || "a_verifier");
   const achatStatus = statusBadge(data.metricStatuts.achat || "a_verifier");
+  const ecartRealRaw = data.metricReals?.ecart;
+  const ecartReal =
+    ecartRealRaw !== undefined && ecartRealRaw !== null && `${ecartRealRaw}`.trim() !== ""
+      ? Number(ecartRealRaw)
+      : null;
+  const ecartValue = ecartReal !== null && !Number.isNaN(ecartReal) ? ecartReal : data.ecart;
 
   const drawHeader = () => {
     doc.setFillColor(colors.header.r, colors.header.g, colors.header.b);
@@ -80,12 +87,12 @@ export function exportFactureReportPdf(data: FactureReportData) {
     doc.text(data.entrepriseNom || "Entreprise", margin, 11);
     // Logo en haut à droite si disponible (remplace la date/heure)
     if (data.logoDataUrl) {
-      const targetHeight = data.logoHeightMm ?? 12;
+      const targetHeight = data.logoHeightMm ?? headerBandHeight * 1.15; // légèrement plus grand que la bande
       const targetWidth = data.logoWidthMm ?? 0;
       const height = targetHeight;
       const width = targetWidth && targetWidth > 0 ? targetWidth : targetHeight * 1.8; // fallback ratio
       const x = pageWidth - margin - width;
-      const y = 4;
+      const y = Math.max(0, (headerBandHeight - height) / 2);
       doc.addImage(data.logoDataUrl, "PNG", x, y, width, height, undefined, "FAST");
     }
     doc.setTextColor(30, 41, 59);
@@ -175,6 +182,9 @@ export function exportFactureReportPdf(data: FactureReportData) {
   currentY += lineHeight;
   drawKeyValue("Statut de la facture", factureStatus.label, colX, colWidth);
   drawKeyValue("\u00c9cart facture / lignes", formatCurrency(data.ecart), colX, colWidth);
+  if (ecartReal !== null && !Number.isNaN(ecartReal)) {
+    drawKeyValue("\u00c9cart corrig\u00e9 (contestation)", formatCurrency(ecartValue), colX, colWidth);
+  }
   drawKeyValue("Achats", formatCurrency(data.achat), colX, colWidth);
 
   currentY += 10;
@@ -193,10 +203,14 @@ export function exportFactureReportPdf(data: FactureReportData) {
   doc.setTextColor(30, 41, 59);
   currentY += statusBarHeight + 4;
 
-  const syntheseLines = [
-    `Statut écart : ${ecartStatus.label}`,
-    `Montant écart : ${formatCurrency(data.ecart)}`,
-  ];
+  const syntheseLines = [`Statut écart : ${ecartStatus.label}`];
+  if (ecartReal !== null && !Number.isNaN(ecartReal)) {
+    syntheseLines.push(
+      `Montant écart (corrigé) : ${formatCurrency(ecartValue)} (initial : ${formatCurrency(data.ecart)})`
+    );
+  } else {
+    syntheseLines.push(`Montant écart : ${formatCurrency(data.ecart)}`);
+  }
   syntheseLines.forEach((line) => {
     addPageIfNeeded(lineHeight);
     doc.text(line, margin + 2, currentY);
@@ -314,6 +328,9 @@ export interface LotRecapData {
   lotNom: string;
   moisSelectionnes: string[];
   comptes: LotRecapCompte[];
+  logoDataUrl?: string;
+  logoWidthMm?: number;
+  logoHeightMm?: number;
 }
 
 export interface LotMonthDetail {
@@ -332,7 +349,7 @@ export function exportLotRecapPdf(data: LotRecapData) {
   const pageHeight = doc.internal.pageSize.getHeight();
   const margin = 12;
   const lineHeight = 6;
-  const headerBandHeight = 18;
+  const headerBandHeight = 24;
 
   const colors = {
     header: { r: 205, g: 231, b: 245 },
@@ -344,24 +361,22 @@ export function exportLotRecapPdf(data: LotRecapData) {
     warning: { r: 156, g: 163, b: 175 }, // gris pour "a verifier"
   };
 
-  const now = new Date().toLocaleString("fr-FR", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-
   const header = () => {
     doc.setFillColor(colors.header.r, colors.header.g, colors.header.b);
     doc.rect(0, 0, pageWidth, headerBandHeight, "F");
     doc.setTextColor(colors.primary.r, colors.primary.g, colors.primary.b);
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(14);
-    doc.text(data.entrepriseNom || "Entreprise", margin, 8);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(10);
-    doc.text(now, pageWidth - margin, 8, { align: "right" as any });
+    doc.setFontSize(18);
+    doc.text(data.entrepriseNom || "Entreprise", margin, 11);
+    if (data.logoDataUrl) {
+      const targetHeight = data.logoHeightMm ?? headerBandHeight * 1.15; // légèrement plus grand que la bande
+      const ratioWidth = data.logoWidthMm && data.logoWidthMm > 0 ? data.logoWidthMm : targetHeight * 1.8;
+      const width = ratioWidth;
+      const height = targetHeight;
+      const x = pageWidth - margin - width;
+      const y = Math.max(0, (headerBandHeight - height) / 2);
+      doc.addImage(data.logoDataUrl, "PNG", x, y, width, height, undefined, "FAST");
+    }
     doc.setTextColor(30, 41, 59);
     doc.setFontSize(10);
   };
@@ -411,14 +426,14 @@ export function exportLotRecapPdf(data: LotRecapData) {
   const maxY = pageHeight - margin;
 
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(18);
-  doc.setTextColor(30, 41, 59);
+  doc.setFontSize(20);
+  doc.setTextColor(colors.primary.r, colors.primary.g, colors.primary.b);
   doc.text("Recapitulatif du lot", pageWidth / 2, y, { align: "center" as any });
   doc.setFont("helvetica", "bold");
   doc.setFontSize(14);
+  doc.setTextColor(30, 41, 59);
   doc.text(`Lot : ${data.lotNom}`, margin, y + 8);
   doc.setFont("helvetica", "normal");
-  doc.setTextColor(30, 41, 59);
   doc.setFontSize(10);
   y += 14;
 
