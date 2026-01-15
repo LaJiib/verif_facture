@@ -1,10 +1,15 @@
+#define MyAppVersion GetEnv("VF_VERSION")
+#if MyAppVersion == ""
+  #define MyAppVersion "0.0.0"
+#endif
+
 [Setup]
 AppName=VerifFacture
-AppVersion=1.0.1
+AppVersion={#MyAppVersion}
 DefaultDirName={commonpf}\VerifFacture
 DefaultGroupName=VerifFacture
 OutputDir=installer\output
-OutputBaseFilename=VerifFacture-Setup
+OutputBaseFilename=VerifFacture-Setup-{#MyAppVersion}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern

@@ -10,6 +10,7 @@ try:
 except NameError:
     root = Path.cwd()
 
+version_file = root / "build" / "VerifFactureVersion.txt"
 static_dir = root / "backend" / "static"
 static_datas = []
 if static_dir.exists():
@@ -48,4 +49,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon="installer\\logo.ico",
+    version=str(version_file),
 )
