@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, func
 from sqlalchemy.orm import Session, sessionmaker
 import requests
 
@@ -37,7 +37,17 @@ from .config import (
     CONFIG_DB_PATH,
     persist_db_path,
 )
-from .models import Base, Entreprise, Compte, Ligne, Facture, LigneFacture, FactureReport
+from .models import (
+    Base,
+    Entreprise,
+    Compte,
+    Ligne,
+    Facture,
+    LigneFacture,
+    FactureReport,
+    Abonnement,
+    LigneAbonnement,
+)
 from .storage import list_uploads, delete_upload, delete_uploads_for_entreprise, store_csv_file, StorageError, load_upload_bytes, get_upload
 
 # Configuration du logging
@@ -246,6 +256,58 @@ class LigneFactureResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ============================================================================
+# SCHEMAS PYDANTIC - ABONNEMENTS
+# ============================================================================
+
+
+class AbonnementBase(BaseModel):
+    nom: str
+    prix: float = 0
+    commentaire: Optional[str] = None
+
+
+class AbonnementCreate(AbonnementBase):
+    pass
+
+
+class AbonnementUpdate(BaseModel):
+    nom: Optional[str] = None
+    prix: Optional[float] = None
+    commentaire: Optional[str] = None
+
+
+class AbonnementResponse(AbonnementBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+
+class AbonnementAttachPayload(BaseModel):
+    ligne_ids: List[int]
+    abonnement_id: Optional[int] = None
+    nom: Optional[str] = None
+    prix: Optional[float] = None
+    commentaire: Optional[str] = None
+    date: Optional[str] = None  # ISO "YYYY-MM-DD" ou null
+
+
+class AbonnementAttachResponse(BaseModel):
+    abonnement: AbonnementResponse
+    ligne_ids: List[int]
+    date: Optional[date]
+
+
+class FactureAbonnementLink(BaseModel):
+    ligne_id: int
+    ligne_type: int
+    prix_abo: float
+    date: Optional[date]
+    abonnement: AbonnementResponse
+
 
 # ============================================================================
 # SCHEMAS PYDANTIC - RAPPORT FACTURE
@@ -1043,6 +1105,168 @@ def delete_ligne(ligne_id: int, db: Session = Depends(get_db)):
 
 
 # ============================================================================
+# ENDPOINTS - ABONNEMENTS
+# ============================================================================
+
+
+@app.get("/abonnements", response_model=List[AbonnementResponse])
+def list_abonnements(db: Session = Depends(get_db)):
+    """Liste tous les abonnements disponibles (global)."""
+    return db.query(Abonnement).order_by(Abonnement.nom.asc()).all()
+
+
+@app.post("/abonnements", response_model=AbonnementResponse)
+def create_abonnement(abonnement: AbonnementCreate, db: Session = Depends(get_db)):
+    """Crée un nouvel abonnement."""
+    nom_clean = (abonnement.nom or "").strip()
+    if not nom_clean:
+        raise HTTPException(status_code=400, detail="Le nom d'abonnement est obligatoire")
+
+    existing = db.query(Abonnement).filter(func.lower(Abonnement.nom) == nom_clean.lower()).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Un abonnement avec ce nom existe déjà")
+
+    db_abonnement = Abonnement(nom=nom_clean, prix=abonnement.prix, commentaire=abonnement.commentaire)
+    db.add(db_abonnement)
+    try:
+        db.commit()
+        db.refresh(db_abonnement)
+        return db_abonnement
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/abonnements/{abonnement_id}", response_model=AbonnementResponse)
+def get_abonnement(abonnement_id: int, db: Session = Depends(get_db)):
+    """Récupère un abonnement par ID."""
+    abo = db.query(Abonnement).filter(Abonnement.id == abonnement_id).first()
+    if not abo:
+        raise HTTPException(status_code=404, detail="Abonnement non trouvé")
+    return abo
+
+
+@app.put("/abonnements/{abonnement_id}", response_model=AbonnementResponse)
+def update_abonnement(abonnement_id: int, abonnement: AbonnementUpdate, db: Session = Depends(get_db)):
+    """Met à jour un abonnement (nom/prix/commentaire)."""
+    db_abonnement = db.query(Abonnement).filter(Abonnement.id == abonnement_id).first()
+    if not db_abonnement:
+        raise HTTPException(status_code=404, detail="Abonnement non trouvé")
+
+    if abonnement.nom is not None:
+        nom_clean = abonnement.nom.strip()
+        if not nom_clean:
+            raise HTTPException(status_code=400, detail="Le nom d'abonnement est obligatoire")
+        conflict = (
+            db.query(Abonnement)
+            .filter(func.lower(Abonnement.nom) == nom_clean.lower(), Abonnement.id != abonnement_id)
+            .first()
+        )
+        if conflict:
+            raise HTTPException(status_code=400, detail="Un autre abonnement porte déjà ce nom")
+        db_abonnement.nom = nom_clean
+    if abonnement.prix is not None:
+        db_abonnement.prix = abonnement.prix
+    if abonnement.commentaire is not None:
+        db_abonnement.commentaire = abonnement.commentaire
+
+    try:
+        db.commit()
+        db.refresh(db_abonnement)
+        return db_abonnement
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/abonnements/{abonnement_id}")
+def delete_abonnement(abonnement_id: int, db: Session = Depends(get_db)):
+    """Supprime un abonnement (et les liens)."""
+    db_abonnement = db.query(Abonnement).filter(Abonnement.id == abonnement_id).first()
+    if not db_abonnement:
+        raise HTTPException(status_code=404, detail="Abonnement non trouvé")
+    db.delete(db_abonnement)
+    db.commit()
+    return {"message": "Abonnement supprimé"}
+
+
+@app.post("/abonnements/attacher", response_model=AbonnementAttachResponse)
+def attach_abonnement(payload: AbonnementAttachPayload, db: Session = Depends(get_db)):
+    """
+    Attache un abonnement (existant ou nouvellement créé) à une liste de lignes.
+    Utilisé depuis la vue rapport lors d'une contestation d'abo.
+    """
+    if not payload.ligne_ids:
+        raise HTTPException(status_code=400, detail="Aucune ligne ciblée")
+
+    unique_ids = list(dict.fromkeys(payload.ligne_ids))
+    lignes = db.query(Ligne).filter(Ligne.id.in_(unique_ids)).all()
+    found_ids = {l.id for l in lignes}
+    missing = [lid for lid in unique_ids if lid not in found_ids]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Lignes introuvables: {missing}")
+
+    # Crée ou récupère l'abonnement
+    target_date = None
+    if payload.date:
+        try:
+            target_date = date.fromisoformat(str(payload.date))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Date invalide (attendu YYYY-MM-DD)")
+    else:
+        target_date = date.today()
+    if payload.abonnement_id:
+        abonnement = db.query(Abonnement).filter(Abonnement.id == payload.abonnement_id).first()
+        if not abonnement:
+            raise HTTPException(status_code=404, detail="Abonnement non trouvé")
+        if payload.nom is not None and payload.nom.strip():
+            abonnement.nom = payload.nom.strip()
+        if payload.prix is not None:
+            abonnement.prix = payload.prix
+        if payload.commentaire is not None:
+            abonnement.commentaire = payload.commentaire
+    else:
+        nom_clean = (payload.nom or "").strip()
+        if not nom_clean:
+            raise HTTPException(status_code=400, detail="Nom obligatoire pour créer un abonnement")
+        abonnement = db.query(Abonnement).filter(func.lower(Abonnement.nom) == nom_clean.lower()).first()
+        if abonnement:
+            if payload.prix is not None:
+                abonnement.prix = payload.prix
+            if payload.commentaire is not None:
+                abonnement.commentaire = payload.commentaire
+        else:
+            abonnement = Abonnement(nom=nom_clean, prix=payload.prix or 0, commentaire=payload.commentaire)
+            db.add(abonnement)
+            db.flush()
+
+    # Création des liaisons idempotentes
+    for ligne in lignes:
+        exists = (
+            db.query(LigneAbonnement)
+            .filter(
+                LigneAbonnement.abonnement_id == abonnement.id,
+                LigneAbonnement.ligne_id == ligne.id,
+                LigneAbonnement.date == target_date,
+            )
+            .first()
+        )
+        if not exists:
+            db.add(LigneAbonnement(abonnement_id=abonnement.id, ligne_id=ligne.id, date=target_date))
+
+    try:
+        db.commit()
+        db.refresh(abonnement)
+        return AbonnementAttachResponse(abonnement=abonnement, ligne_ids=unique_ids, date=target_date)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================================================
+# ENDPOINTS - FACTURES
+# ============================================================================
+# ============================================================================
 # ENDPOINTS - FACTURES
 # ============================================================================
 
@@ -1141,6 +1365,36 @@ def delete_facture(facture_id: int, db: Session = Depends(get_db)):
     db.delete(db_facture)
     db.commit()
     return {"message": "Facture supprimée"}
+
+
+@app.get("/factures/{facture_id}/abonnements", response_model=List[FactureAbonnementLink])
+def list_facture_abonnements(facture_id: int, db: Session = Depends(get_db)):
+    """Liste les abonnements liés aux lignes d'une facture (pour pré-remplir le rapport)."""
+    facture = db.query(Facture).filter(Facture.id == facture_id).first()
+    if not facture:
+        raise HTTPException(status_code=404, detail="Facture non trouvée")
+
+    links = (
+        db.query(LigneAbonnement, Ligne, Abonnement, LigneFacture)
+        .join(Ligne, LigneAbonnement.ligne_id == Ligne.id)
+        .join(Abonnement, LigneAbonnement.abonnement_id == Abonnement.id)
+        .join(LigneFacture, LigneFacture.ligne_id == Ligne.id)
+        .filter(LigneFacture.facture_id == facture_id)
+        .all()
+    )
+    formatted: List[FactureAbonnementLink] = []
+    for link, ligne, abonnement, lf in links:
+        net_val = round(float(lf.abo or 0) + float(lf.remises or 0), 2)
+        formatted.append(
+            FactureAbonnementLink(
+                ligne_id=ligne.id,
+                ligne_type=ligne.type,
+                prix_abo=net_val,
+                date=link.date,
+                abonnement=abonnement,
+            )
+        )
+    return formatted
 
 
 

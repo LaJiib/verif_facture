@@ -12,7 +12,14 @@ export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localho
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const errorBody = await res.json().catch(() => ({}));
-    const message = errorBody.detail || "Erreur lors de l'appel API.";
+    let message: string = errorBody.detail || res.statusText || "Erreur lors de l'appel API.";
+    if (typeof message === "object") {
+      try {
+        message = JSON.stringify(message);
+      } catch {
+        message = "Erreur lors de l'appel API.";
+      }
+    }
     throw new Error(message);
   }
   return res.json() as Promise<T>;
@@ -171,6 +178,36 @@ export interface LigneFacture {
   total_ht: number;
 }
 
+export interface Abonnement {
+  id: number;
+  nom: string;
+  prix: number;
+  commentaire?: string | null;
+}
+
+export interface FactureAbonnementLink {
+  ligne_id: number;
+  ligne_type: number;
+  prix_abo: number;
+  date?: string | null;
+  abonnement: Abonnement;
+}
+
+export interface AbonnementAttachPayload {
+  ligne_ids: number[];
+  abonnement_id?: number | null;
+  nom?: string | null;
+  prix?: number | null;
+  commentaire?: string | null;
+  date?: string | null;
+}
+
+export interface AbonnementAttachResponse {
+  abonnement: Abonnement;
+  ligne_ids: number[];
+  date?: string | null;
+}
+
 export async function shutdownBackend(): Promise<void> {
   const res = await fetch(`${API_BASE_URL}/shutdown`, { method: "POST" });
   if (!res.ok) {
@@ -197,6 +234,29 @@ export async function updateLigneFacture(
     body: JSON.stringify(payload),
   });
   return handleResponse<LigneFacture>(res);
+}
+
+// ============================================================================
+// API CALL - ABONNEMENTS
+// ============================================================================
+
+export async function listAbonnements(): Promise<Abonnement[]> {
+  const res = await fetch(`${API_BASE_URL}/abonnements`);
+  return handleResponse<Abonnement[]>(res);
+}
+
+export async function attachAbonnementToLines(payload: AbonnementAttachPayload): Promise<AbonnementAttachResponse> {
+  const res = await fetch(`${API_BASE_URL}/abonnements/attacher`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<AbonnementAttachResponse>(res);
+}
+
+export async function getFactureAbonnements(factureId: number): Promise<FactureAbonnementLink[]> {
+  const res = await fetch(`${API_BASE_URL}/factures/${factureId}/abonnements`);
+  return handleResponse<FactureAbonnementLink[]>(res);
 }
 
 // ============================================================================

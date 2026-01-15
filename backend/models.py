@@ -65,6 +65,34 @@ class Ligne(Base):
 
     compte = relationship("Compte", back_populates="lignes")
     ligne_factures = relationship("LigneFacture", back_populates="ligne", cascade="all, delete-orphan")
+    ligne_abonnements = relationship("LigneAbonnement", back_populates="ligne", cascade="all, delete-orphan")
+    abonnements = relationship("Abonnement", secondary="lignes_abonnements", back_populates="lignes")
+
+
+class Abonnement(Base):
+    __tablename__ = "abonnements"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    nom = Column(String, nullable=False, unique=True)
+    prix = Column(Numeric(10, 2), nullable=False, default=0)
+    commentaire = Column(Text, nullable=True)
+
+    lignes = relationship("Ligne", secondary="lignes_abonnements", back_populates="abonnements")
+    ligne_abonnements = relationship("LigneAbonnement", back_populates="abonnement", cascade="all, delete-orphan")
+
+
+class LigneAbonnement(Base):
+    __tablename__ = "lignes_abonnements"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    abonnement_id = Column(Integer, ForeignKey("abonnements.id", ondelete="CASCADE"), nullable=False)
+    ligne_id = Column(Integer, ForeignKey("lignes.id", ondelete="CASCADE"), nullable=False)
+    date = Column(Date, nullable=True)
+
+    __table_args__ = (UniqueConstraint("abonnement_id", "ligne_id", "date", name="uix_ligne_abonnement"),)
+
+    abonnement = relationship("Abonnement", back_populates="ligne_abonnements")
+    ligne = relationship("Ligne", back_populates="ligne_abonnements")
 
 
 class Facture(Base):

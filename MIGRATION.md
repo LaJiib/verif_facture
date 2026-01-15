@@ -2,7 +2,7 @@
 
 ## Modifications apportées
 
-### Nouveau modèle de données (5 tables)
+### Nouveau modèle de données (7 tables)
 
 **Architecture précédente:**
 - Entreprise → Compte (ligne télécom) → Facture
@@ -13,6 +13,8 @@
 - **Ligne** : [id, num, type, compte_id] - Lignes télécom (numéros d'accès)
 - **Facture** : [id, fournisseur, num, compte_id, date, abo, conso, remises, achat]
 - **LigneFacture** : [id, facture_id, ligne_id, abo, conso, remises, achat] - Relation many-to-many
+- **Abonnement** : [id, nom, prix, commentaire] - Référentiel des types d'abonnement
+- **LigneAbonnement** : [id, abonnement_id, ligne_id, date] - Liaison N..N entre lignes et abonnements (avec date d'effet)
 
 ### Hiérarchie des données
 
@@ -45,13 +47,21 @@ Par défaut, le script cherche la base à l’emplacement utilisé par l’exéc
 `%LOCALAPPDATA%\VerifFacture\data\invoices.db` (configuré dans `backend/config.py`). Vous pouvez
 forcer un autre chemin avec `VERIF_FACTURE_DB_PATH` ou `VERIF_FACTURE_DATA_DIR`.
 
-### 3. (Option) Recréer la base de données from scratch
+### 3. Ajouter les tables d'abonnement (nouvelle fonctionnalité)
+
+```powershell
+python scripts/migrate_add_abonnements.py
+```
+
+Le script est idempotent : il crée `abonnements` et `lignes_abonnements` uniquement si elles sont absentes (clés uniques + clés étrangères).
+
+### 4. (Option) Recréer la base de données from scratch
 
 ```powershell
 Remove-Item backend\invoices.db
 ```
 
-### 4. Relancer les serveurs
+### 5. Relancer les serveurs
 
 ```powershell
 .\scripts\dev.ps1
@@ -59,13 +69,13 @@ Remove-Item backend\invoices.db
 
 La nouvelle base de données sera automatiquement créée avec le nouveau schéma au démarrage du backend.
 
-### 5. Créer une entreprise
+### 6. Créer une entreprise
 
 Dans l'interface web, cliquez sur **"Ajouter une entreprise"** dans le menu latéral.
 
-### 6. Importer un CSV
+### 7. Importer un CSV
 
-Les fichiers CSV au format Orange seront automatiquement analysés et les données seront réparties dans les 5 tables :
+Les fichiers CSV au format Orange seront automatiquement analysés et les données seront réparties dans les 7 tables :
 
 **Processus d'import:**
 1. **Extraction des comptes** : Identifie tous les "Numéro compte" uniques
@@ -135,7 +145,7 @@ Le système détecte automatiquement le type de ligne en fonction des mots-clés
 ## Structure des fichiers modifiés
 
 ### Backend
-- `backend/models.py` - Nouveaux modèles SQLAlchemy (5 tables)
+- `backend/models.py` - Nouveaux modèles SQLAlchemy (7 tables)
 - `backend/api.py` - Endpoints CRUD complets pour toutes les tables
 
 ### Frontend

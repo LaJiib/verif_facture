@@ -1,5 +1,17 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { executeQuery, updateLigneType, getFactureRapport, upsertFactureRapport, updateFacture, listLignesFactures, updateLigneFacture } from "../newApi";
+import {
+  executeQuery,
+  updateLigneType,
+  getFactureRapport,
+  upsertFactureRapport,
+  updateFacture,
+  listLignesFactures,
+  updateLigneFacture,
+  listAbonnements,
+  attachAbonnementToLines,
+  getFactureAbonnements,
+  Abonnement,
+} from "../newApi";
 import { decodeLineType, decodeFactureStatus, decodeLigneFactureStatus } from "../utils/codecs";
 import { exportFactureReportPdf } from "../utils/pdfReport";
 import { exportFactureReportDocx } from "../utils/docxReport";
@@ -66,6 +78,9 @@ interface DetailLigne {
   ligne_num: string;
   ligne_type: number;
   ligne_statut?: number;
+  abo_id_ref?: number | null;
+  abo_nom_ref?: string | null;
+  abo_prix_ref?: number | null;
   abo: number;
   conso: number;
   remises: number;
@@ -101,6 +116,9 @@ interface FactureLigneGroupe {
   facture_num: string;
   facture_date: string;
   ligne_type: number;
+  group_key: string;
+  match_type: number;
+  match_net: number;
   prix_abo: number;
   count: number;
   abo: number;
@@ -108,6 +126,16 @@ interface FactureLigneGroupe {
   remises: number;
   netAbo: number;
   achat: number;
+  abo_nom?: string | null;
+  abo_id?: number | null;
+}
+
+interface AbonnementSelection {
+  mode: "existing" | "new";
+  abonnementId?: number | null;
+  nom?: string | null;
+  prix?: number | null;
+  commentaire?: string | null;
 }
 
 const statutTokens: Record<StatutValeur, { bg: string; color: string; label: string }> = {
@@ -194,6 +222,15 @@ export default function CompteDetailModal({
   const [factureGroupAnomalies, setFactureGroupAnomalies] = useState<Record<number, Record<string, LigneAnomalie[]>>>({});
   const [factureMetricReals, setFactureMetricReals] = useState<Record<number, { ecart?: string }>>({});
   const [factureGroupReals, setFactureGroupReals] = useState<Record<number, Record<string, { aboNet?: string; achat?: string }>>>({});
+  const [factureGroupAbonnements, setFactureGroupAbonnements] = useState<Record<number, Record<string, AbonnementSelection>>>({});
+  const [abonnements, setAbonnements] = useState<Abonnement[]>([]);
+  const [abonnementsLoading, setAbonnementsLoading] = useState(false);
+  const [aboModal, setAboModal] = useState<{ open: boolean; groupKey: string | null; lineIds: number[] }>({
+    open: false,
+    groupKey: null,
+    lineIds: [],
+  });
+  const [aboModalSaving, setAboModalSaving] = useState(false);
   const [autoLoading, setAutoLoading] = useState(false);
   const [resetLoading, setResetLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -217,6 +254,25 @@ export default function CompteDetailModal({
   useEffect(() => {
     loadData();
   }, [compteId, mois]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadAbonnementsList() {
+      try {
+        setAbonnementsLoading(true);
+        const list = await listAbonnements();
+        if (!cancelled) setAbonnements(list);
+      } catch (err) {
+        console.error("Impossible de charger les abonnements", err);
+      } finally {
+        if (!cancelled) setAbonnementsLoading(false);
+      }
+    }
+    loadAbonnementsList();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -281,8 +337,8 @@ export default function CompteDetailModal({
         csv_id: factureCourante.csv_id,
       });
 
-      const autoResult = await runAutoVerification({
-        factureId: factureCourante.facture_id,
+    const autoResult = await runAutoVerification({
+      factureId: factureCourante.facture_id,
         compteId,
         factureDate: factureCourante.facture_date,
         factureEcart: factureCourante.ecart,
@@ -424,6 +480,9 @@ export default function CompteDetailModal({
     try {
       // Condition de filtrage par mois
       const moisFilter = mois ? `AND strftime('%Y-%m', f.date) = '${mois}'` : "";
+      const effectiveDateExpr = mois
+        ? `(SELECT MAX(f2.date) FROM factures f2 WHERE f2.compte_id = ${compteId} AND strftime('%Y-%m', f2.date) = '${mois}')`
+        : `(SELECT MAX(f2.date) FROM factures f2 WHERE f2.compte_id = ${compteId})`;
 
       // Trouver le dernier mois disponible avant le mois courant (le plus récent, pas forcément mois-1)
       let prevFilter = "";
@@ -483,6 +542,42 @@ export default function CompteDetailModal({
           l.id as ligne_id,
           l.num as ligne_num,
           l.type as ligne_type,
+          (
+            SELECT a.id
+            FROM lignes_abonnements la
+            JOIN abonnements a ON a.id = la.abonnement_id
+            WHERE la.ligne_id = l.id
+              AND (la.date IS NULL OR la.date <= ${effectiveDateExpr})
+            ORDER BY
+              CASE WHEN la.date IS NULL THEN 1 ELSE 0 END,
+              la.date DESC,
+              la.id DESC
+            LIMIT 1
+          ) as abo_id_ref,
+          (
+            SELECT a.nom
+            FROM lignes_abonnements la
+            JOIN abonnements a ON a.id = la.abonnement_id
+            WHERE la.ligne_id = l.id
+              AND (la.date IS NULL OR la.date <= ${effectiveDateExpr})
+            ORDER BY
+              CASE WHEN la.date IS NULL THEN 1 ELSE 0 END,
+              la.date DESC,
+              la.id DESC
+            LIMIT 1
+          ) as abo_nom_ref,
+          (
+            SELECT a.prix
+            FROM lignes_abonnements la
+            JOIN abonnements a ON a.id = la.abonnement_id
+            WHERE la.ligne_id = l.id
+              AND (la.date IS NULL OR la.date <= ${effectiveDateExpr})
+            ORDER BY
+              CASE WHEN la.date IS NULL THEN 1 ELSE 0 END,
+              la.date DESC,
+              la.id DESC
+            LIMIT 1
+          ) as abo_prix_ref,
           lf.statut as ligne_statut,
           SUM(lf.abo) as abo,
           SUM(lf.conso) as conso,
@@ -512,13 +607,49 @@ export default function CompteDetailModal({
             l.id as ligne_id,
             l.num as ligne_num,
             l.type as ligne_type,
+            (
+              SELECT a.id
+              FROM lignes_abonnements la
+              JOIN abonnements a ON a.id = la.abonnement_id
+              WHERE la.ligne_id = l.id
+                AND (la.date IS NULL OR la.date <= ${effectiveDateExpr})
+              ORDER BY
+                CASE WHEN la.date IS NULL THEN 1 ELSE 0 END,
+                la.date DESC,
+                la.id DESC
+              LIMIT 1
+            ) as abo_id_ref,
+            (
+              SELECT a.nom
+              FROM lignes_abonnements la
+              JOIN abonnements a ON a.id = la.abonnement_id
+              WHERE la.ligne_id = l.id
+                AND (la.date IS NULL OR la.date <= ${effectiveDateExpr})
+              ORDER BY
+                CASE WHEN la.date IS NULL THEN 1 ELSE 0 END,
+                la.date DESC,
+                la.id DESC
+              LIMIT 1
+            ) as abo_nom_ref,
+            (
+              SELECT a.prix
+              FROM lignes_abonnements la
+              JOIN abonnements a ON a.id = la.abonnement_id
+              WHERE la.ligne_id = l.id
+                AND (la.date IS NULL OR la.date <= ${effectiveDateExpr})
+              ORDER BY
+                CASE WHEN la.date IS NULL THEN 1 ELSE 0 END,
+                la.date DESC,
+                la.id DESC
+              LIMIT 1
+            ) as abo_prix_ref,
             lf.statut as ligne_statut,
             SUM(lf.abo) as abo,
             SUM(lf.conso) as conso,
             SUM(lf.remises) as remises,
             SUM(lf.achat) as achat,
-            SUM(lf.abo + lf.conso + lf.remises + lf.achat) as total_ht
-          FROM lignes l
+          SUM(lf.abo + lf.conso + lf.remises + lf.achat) as total_ht
+        FROM lignes l
           JOIN lignes_factures lf ON lf.ligne_id = l.id
           JOIN factures f ON f.id = lf.facture_id
           WHERE l.compte_id = ${compteId}
@@ -574,30 +705,106 @@ export default function CompteDetailModal({
       const facturesLignesResult = await executeQuery(facturesLignesQuery);
       setFactureLignesResume(facturesLignesResult.data || []);
 
-      // RequǦte pour consolider les lignes par facture / type / prix abo
+      // Requête pour récupérer les lignes par facture avec abonnement éventuel (on regroupera côté JS)
       const facturesLignesGroupQuery = `
         SELECT
           f.id as facture_id,
           f.num as facture_num,
           f.date as facture_date,
-          COALESCE(l.type, 'Non renseigne') as ligne_type,
+          l.id as ligne_id,
+          l.num as ligne_num,
+          COALESCE(l.type, 3) as ligne_type,
           ROUND(lf.abo + lf.remises, 2) as prix_abo,
-          COUNT(lf.id) as count,
-          SUM(lf.abo) as abo,
-          SUM(lf.conso) as conso,
-          SUM(lf.remises) as remises,
-          SUM(lf.abo + lf.remises) as netAbo,
-          SUM(lf.achat) as achat
+          lf.abo as abo,
+          lf.conso as conso,
+          lf.remises as remises,
+          lf.achat as achat,
+          (
+            SELECT a.nom
+            FROM lignes_abonnements la
+            JOIN abonnements a ON a.id = la.abonnement_id
+            WHERE la.ligne_id = l.id
+              AND (la.date IS NULL OR la.date <= f.date)
+            ORDER BY
+              CASE WHEN la.date IS NULL THEN 1 ELSE 0 END,
+              la.date DESC,
+              la.id DESC
+            LIMIT 1
+          ) as abo_nom,
+          (
+            SELECT a.id
+            FROM lignes_abonnements la
+            JOIN abonnements a ON a.id = la.abonnement_id
+            WHERE la.ligne_id = l.id
+              AND (la.date IS NULL OR la.date <= f.date)
+            ORDER BY
+              CASE WHEN la.date IS NULL THEN 1 ELSE 0 END,
+              la.date DESC,
+              la.id DESC
+            LIMIT 1
+          ) as abo_id,
+          (
+            SELECT a.prix
+            FROM lignes_abonnements la
+            JOIN abonnements a ON a.id = la.abonnement_id
+            WHERE la.ligne_id = l.id
+              AND (la.date IS NULL OR la.date <= f.date)
+            ORDER BY
+              CASE WHEN la.date IS NULL THEN 1 ELSE 0 END,
+              la.date DESC,
+              la.id DESC
+            LIMIT 1
+          ) as abo_prix
         FROM factures f
         JOIN lignes_factures lf ON lf.facture_id = f.id
         JOIN lignes l ON l.id = lf.ligne_id
         WHERE f.compte_id = ${compteId}
         ${moisFilter}
-        GROUP BY f.id, f.num, f.date, ligne_type, prix_abo
-        ORDER BY f.date DESC, netAbo DESC
+        ORDER BY f.date DESC, lf.id DESC
       `;
       const facturesLignesGroupResult = await executeQuery(facturesLignesGroupQuery);
-      setFactureLigneGroupes(facturesLignesGroupResult.data || []);
+      const groupesAgg: FactureLigneGroupe[] = [];
+      const byKey: Record<string, FactureLigneGroupe> = {};
+      (facturesLignesGroupResult.data || []).forEach((row: any) => {
+        const netUnit = Number(row.prix_abo || 0);
+        const hasAbo = row.abo_nom && row.abo_id;
+        const groupKey = hasAbo
+          ? `abo|${row.abo_id}`
+          : `price|${row.ligne_type}|${netUnit.toFixed(2)}`;
+        const mapKey = `${row.facture_id}|${groupKey}`;
+        const existing = byKey[mapKey];
+        if (existing) {
+          existing.count += 1;
+          existing.abo += Number(row.abo || 0);
+          existing.conso += Number(row.conso || 0);
+          existing.remises += Number(row.remises || 0);
+          existing.netAbo += Number(row.abo || 0) + Number(row.remises || 0);
+          existing.achat += Number(row.achat || 0);
+          existing.prix_abo = netUnit; // dernier net (mais utilisé pour affichage)
+        } else {
+          byKey[mapKey] = {
+            facture_id: row.facture_id,
+            facture_num: row.facture_num,
+            facture_date: row.facture_date,
+            ligne_type: row.ligne_type,
+            group_key: groupKey,
+            match_type: row.ligne_type,
+            match_net: netUnit,
+            prix_abo: netUnit,
+            count: 1,
+            abo: Number(row.abo || 0),
+            conso: Number(row.conso || 0),
+            remises: Number(row.remises || 0),
+            netAbo: Number(row.abo || 0) + Number(row.remises || 0),
+            achat: Number(row.achat || 0),
+            abo_nom: row.abo_nom || null,
+            abo_id: row.abo_id || null,
+          };
+        }
+      });
+      Object.values(byKey).forEach((g) => groupesAgg.push(g));
+      groupesAgg.sort((a, b) => (a.facture_date < b.facture_date ? 1 : a.facture_date > b.facture_date ? -1 : b.netAbo - a.netAbo));
+      setFactureLigneGroupes(groupesAgg);
 
       if (mois) {
         const prevFacturesQuery = `
@@ -740,6 +947,208 @@ export default function CompteDetailModal({
   });
   const facturesEnAlerte = facturesAvecEcart.filter((f) => Math.abs(f.ecart) > 0.05);
 
+  const factureCourante = facturesAvecEcart.find((f) => f.facture_id === selectedFactureId) || null;
+  const ligneGroupesFacture = factureLigneGroupes.filter((g) => g.facture_id === selectedFactureId);
+  const resumeFacture = factureLignesResume.find((r) => r.facture_id === selectedFactureId) || null;
+  const totalLignesFactureHt = resumeFacture?.lignes_total_ht || 0;
+
+  const modalGroupKey = aboModal.groupKey;
+  function parseGroupKey(key: string | null) {
+    if (!key) return { groupType: null as number | null, targetNet: null as number | null, aboId: null as number | null };
+    const parts = key.split("|");
+    if (parts[0] === "abo") {
+      const aboId = Number(parts[1]);
+      const groupType = parts.length >= 3 ? Number(parts[2]) : null;
+      const targetNet = parts.length >= 4 ? Number(parts[3]) : null;
+      return {
+        groupType: Number.isFinite(groupType) ? groupType : null,
+        targetNet: Number.isFinite(targetNet) ? targetNet : null,
+        aboId: Number.isFinite(aboId) ? aboId : null,
+      };
+    }
+    if (parts[0] === "price") {
+      const groupType = Number(parts[1]);
+      const targetNet = Number(parts[2]);
+      return {
+        groupType: Number.isFinite(groupType) ? groupType : null,
+        targetNet: Number.isFinite(targetNet) ? targetNet : null,
+        aboId: null,
+      };
+    }
+    return { groupType: null, targetNet: null, aboId: null };
+  }
+
+  const modalGroup =
+    modalGroupKey && selectedFactureId
+      ? ligneGroupesFacture.find((g) => g.group_key === modalGroupKey && g.facture_id === selectedFactureId) || null
+      : null;
+  const modalSelection =
+    modalGroupKey && selectedFactureId ? factureGroupAbonnements[selectedFactureId]?.[modalGroupKey] : undefined;
+  const modalDefaultPrice = modalGroup ? Number((modalGroup.count ? modalGroup.netAbo / modalGroup.count : modalGroup.netAbo || 0).toFixed(2)) : 0;
+
+  async function persistAbonnementForGroup(groupKey: string, overrideLineIds: number[] = []) {
+    if (!selectedFactureId) return;
+    const selection = factureGroupAbonnements[selectedFactureId]?.[groupKey];
+    const group = ligneGroupesFacture.find((g) => g.group_key === groupKey);
+    const parsed = parseGroupKey(groupKey);
+    const groupType = group?.match_type ?? parsed.groupType;
+    const targetNet = group?.match_net ?? parsed.targetNet;
+    if (!selection) {
+      alert("Choisis d'abord un abonnement.");
+      return;
+    }
+    if (groupType === null || targetNet === null) {
+      alert("Impossible de déterminer le groupe.");
+      return;
+    }
+
+    let lineIds: number[] = overrideLineIds;
+    if (!lineIds || lineIds.length === 0) {
+      let lignesFacture: any[] = [];
+      try {
+        lignesFacture = await listLignesFactures({ facture_id: selectedFactureId });
+      } catch (err) {
+        console.error("Impossible de récupérer les lignes de la facture", err);
+        alert((err as Error).message || "Impossible de charger les lignes de la facture");
+        return;
+      }
+
+      lineIds = lignesFacture
+        .filter((lf) => {
+          const type = editedTypes[lf.ligne_id];
+          if (type === undefined || type === null) return false;
+          const netVal = Number((Number(lf.abo || 0) + Number(lf.remises || 0)).toFixed(2));
+          return type === groupType && netVal === Number(targetNet.toFixed(2));
+        })
+        .map((lf) => lf.ligne_id);
+    }
+
+    if (lineIds.length === 0) {
+      alert("Aucune ligne correspondante trouvée pour ce groupe.");
+      return;
+    }
+
+    if (selection.mode === "existing" && !selection.abonnementId) {
+      alert("Sélectionne un abonnement existant ou saisis un nouveau nom.");
+      return;
+    }
+    if (selection.mode === "new" && !selection.nom) {
+      alert("Le nom du nouvel abonnement est requis.");
+      return;
+    }
+
+    const cleanNom = (selection.nom || "").trim();
+    const prixNumber = Number(selection.prix ?? targetNet);
+    const payload: any = {
+      ligne_ids: lineIds,
+      date: factureCourante?.facture_date ? factureCourante.facture_date.slice(0, 10) : undefined,
+      prix: Number.isFinite(prixNumber) ? prixNumber : undefined,
+      commentaire: selection.commentaire?.trim() || undefined,
+    };
+    if (selection.mode === "existing" && selection.abonnementId) {
+      payload.abonnement_id = selection.abonnementId;
+    } else if (selection.mode === "new" && cleanNom) {
+      payload.nom = cleanNom;
+    }
+
+    try {
+      setAboModalSaving(true);
+      const resp = await attachAbonnementToLines(payload);
+      const newKey = `abo|${resp.abonnement.id}|${groupType ?? ""}|${(targetNet ?? 0).toFixed(2)}`;
+      setAbonnements((prev) => {
+        const existing = prev.find((a) => a.id === resp.abonnement.id);
+        if (existing) {
+          return prev.map((a) => (a.id === resp.abonnement.id ? resp.abonnement : a));
+        }
+        return [...prev, resp.abonnement].sort((a, b) => a.nom.localeCompare(b.nom));
+      });
+      setFactureGroupAbonnements((prev) => ({
+        ...prev,
+        [selectedFactureId]: {
+          ...(prev[selectedFactureId] || {}),
+          // on stocke aussi sous la nouvelle clé pour rester cohérent avec le regroupement DB
+          [groupKey]: {
+            mode: "existing",
+            abonnementId: resp.abonnement.id,
+            nom: resp.abonnement.nom,
+            prix: resp.abonnement.prix,
+            commentaire: resp.abonnement.commentaire ?? null,
+          },
+          [newKey]: {
+            mode: "existing",
+            abonnementId: resp.abonnement.id,
+            nom: resp.abonnement.nom,
+            prix: resp.abonnement.prix,
+            commentaire: resp.abonnement.commentaire ?? null,
+          },
+        },
+      }));
+      setFactureLigneGroupes((prev) =>
+        prev.map((g) => {
+          if (g.facture_id === selectedFactureId && g.group_key === groupKey) {
+            const sameNet = Number((g.match_net || 0).toFixed(2)) === Number((targetNet ?? 0).toFixed(2));
+            return {
+              ...g,
+              group_key: sameNet ? newKey : g.group_key,
+              abo_nom: resp.abonnement.nom,
+              abo_id: resp.abonnement.id,
+            };
+          }
+          return g;
+        })
+      );
+      if (!group) {
+        // Injecte un groupe synthétique pour cohérence locale
+        setFactureLigneGroupes((prev) => [
+          ...prev,
+          {
+            facture_id: selectedFactureId,
+            facture_num: "",
+            facture_date: factureCourante?.facture_date || "",
+            ligne_type: groupType ?? 3,
+            group_key: newKey,
+            match_type: groupType ?? 3,
+            match_net: targetNet ?? 0,
+            prix_abo: targetNet ?? 0,
+            count: lineIds.length,
+            abo: 0,
+            conso: 0,
+            remises: 0,
+            netAbo: (targetNet ?? 0) * lineIds.length,
+            achat: 0,
+            abo_nom: resp.abonnement.nom,
+            abo_id: resp.abonnement.id,
+          },
+        ]);
+      }
+      // Rafraîchit immédiatement la colonne "Abonnement (réf)" pour les lignes concernées
+      setDetailLignes((prev) =>
+        prev.map((l) =>
+          lineIds.includes(l.ligne_id)
+            ? {
+                ...l,
+                abo_id_ref: resp.abonnement.id,
+                abo_nom_ref: resp.abonnement.nom,
+                abo_prix_ref: resp.abonnement.prix,
+              }
+            : l
+        )
+      );
+      // Recharge les données pour synchroniser onglet Rapport et Détail lignes avec la base
+      const currentFactureId = selectedFactureId;
+      await loadData();
+      if (currentFactureId) {
+        setSelectedFactureId(currentFactureId);
+      }
+      alert("Abonnement enregistré pour ce groupe.");
+    } catch (err) {
+      console.error("Erreur attachement abonnement", err);
+      alert((err as Error).message || "Impossible d'attacher l'abonnement");
+    } finally {
+      setAboModalSaving(false);
+    }
+  }
+
   useEffect(() => {
     // Sélection par défaut de la première facture du mois dès que les données sont chargées
     if (selectedFactureId === null && detailFactures.length > 0) {
@@ -776,6 +1185,9 @@ export default function CompteDetailModal({
           if (data.groupAnomalies) {
             setFactureGroupAnomalies((prev) => ({ ...prev, [selectedFactureId]: data.groupAnomalies }));
           }
+          if (data.groupAbonnements) {
+            setFactureGroupAbonnements((prev) => ({ ...prev, [selectedFactureId]: data.groupAbonnements }));
+          }
         }
       } catch (err) {
         console.error("Erreur chargement rapport", err);
@@ -784,10 +1196,49 @@ export default function CompteDetailModal({
     fetchRapport();
   }, [selectedFactureId]);
 
-  const factureCourante = facturesAvecEcart.find((f) => f.facture_id === selectedFactureId) || null;
-  const ligneGroupesFacture = factureLigneGroupes.filter((g) => g.facture_id === selectedFactureId);
-  const resumeFacture = factureLignesResume.find((r) => r.facture_id === selectedFactureId) || null;
-  const totalLignesFactureHt = resumeFacture?.lignes_total_ht || 0;
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchFactureAbonnements() {
+      if (!selectedFactureId) return;
+      try {
+        const links = await getFactureAbonnements(selectedFactureId);
+        if (cancelled || !links) return;
+        const autoSelection: Record<string, AbonnementSelection> = {};
+        links.forEach((link) => {
+          const key = link.abonnement?.id
+            ? `abo|${link.abonnement.id}`
+            : `price|${link.ligne_type}|${Number(link.prix_abo || 0).toFixed(2)}`;
+          const existing = autoSelection[key];
+          const selection: AbonnementSelection = {
+            mode: "existing",
+            abonnementId: link.abonnement?.id || null,
+            nom: link.abonnement?.nom || null,
+            prix: link.abonnement?.prix ?? link.prix_abo,
+            commentaire: link.abonnement?.commentaire ?? null,
+          };
+          if (!existing) {
+            autoSelection[key] = selection;
+          } else if (existing.abonnementId !== selection.abonnementId) {
+            autoSelection[key] = { ...existing, abonnementId: null }; // valeurs mixtes, on ne pré-remplit pas
+          }
+        });
+        setFactureGroupAbonnements((prev) => {
+          const prevForFacture = prev[selectedFactureId] || {};
+          const merged = { ...prevForFacture };
+          Object.entries(autoSelection).forEach(([k, v]) => {
+            if (!merged[k]) merged[k] = v;
+          });
+          return { ...prev, [selectedFactureId]: merged };
+        });
+      } catch (err) {
+        console.error("Erreur chargement abonnements facture", err);
+      }
+    }
+    fetchFactureAbonnements();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFactureId]);
 
   const statutDefault: { aboNet: StatutValeur; ecart: StatutValeur; achat: StatutValeur; conso: StatutValeur } = {
     aboNet: "a_verifier",
@@ -868,13 +1319,119 @@ export default function CompteDetailModal({
     }));
   }
 
+  function updateGroupAbonnement(factureId: number, groupKey: string, update: Partial<AbonnementSelection>) {
+    setFactureGroupAbonnements((prev) => ({
+      ...prev,
+      [factureId]: {
+        ...(prev[factureId] || {}),
+        [groupKey]: {
+          mode: "existing",
+          ...(prev[factureId]?.[groupKey] || {}),
+          ...update,
+        },
+      },
+    }));
+  }
+
   const statutToCode: Record<StatutValeur, number> = { a_verifier: 0, valide: 1, conteste: 2 };
 
+  function openAboModal(
+    groupKey: string,
+    lineIds: number[] = [],
+    prefill?: { aboId?: number | null; nom?: string | null; prix?: number | null }
+  ) {
+    if (selectedFactureId) {
+      const group = ligneGroupesFacture.find((g) => g.group_key === groupKey);
+      const current = factureGroupAbonnements[selectedFactureId]?.[groupKey];
+
+      const applyPrefill = () => {
+        if (prefill?.aboId) {
+          updateGroupAbonnement(selectedFactureId, groupKey, {
+            mode: "existing",
+            abonnementId: prefill.aboId,
+            nom: prefill.nom ?? "",
+            prix: prefill.prix ?? undefined,
+          });
+          return true;
+        }
+        return false;
+      };
+
+      const hasPrefill = applyPrefill();
+
+      if (!hasPrefill && !current) {
+        if (group?.abo_id && group.abo_nom) {
+          updateGroupAbonnement(selectedFactureId, groupKey, {
+            mode: "existing",
+            abonnementId: group.abo_id,
+            nom: group.abo_nom,
+            prix: group.match_net,
+          });
+        } else if (group) {
+          updateGroupAbonnement(selectedFactureId, groupKey, {
+            mode: "new",
+            abonnementId: null,
+            nom: "",
+            prix: group.match_net,
+          });
+        } else {
+          const { groupType, targetNet, aboId } = parseGroupKey(groupKey);
+          if (aboId) {
+            updateGroupAbonnement(selectedFactureId, groupKey, {
+              mode: "existing",
+              abonnementId: aboId,
+              prix: targetNet ?? undefined,
+            });
+          } else {
+            updateGroupAbonnement(selectedFactureId, groupKey, {
+              mode: "new",
+              abonnementId: null,
+              nom: "",
+              prix: targetNet ?? undefined,
+            });
+          }
+        }
+      }
+    }
+    setAboModal({ open: true, groupKey, lineIds });
+  }
+
+  function openAboFromLine(ligne: DetailLigne) {
+    const currentType = editedTypes[ligne.ligne_id] ?? ligne.ligne_type ?? 3;
+    const netVal = Number((Number(ligne.abo || 0) + Number(ligne.remises || 0)).toFixed(2));
+    const candidate =
+      ligneGroupesFacture.find(
+        (g) =>
+          g.match_type === currentType &&
+          Number((g.match_net || 0).toFixed(2)) === Number(netVal.toFixed(2))
+      ) || null;
+    const key = candidate
+      ? candidate.group_key
+      : ligne.abo_id_ref
+      ? `abo|${ligne.abo_id_ref}|${currentType}|${netVal.toFixed(2)}`
+      : `price|${currentType}|${netVal.toFixed(2)}`;
+    openAboModal(
+      key,
+      [ligne.ligne_id],
+      ligne.abo_id_ref || ligne.abo_nom_ref
+        ? {
+            aboId: ligne.abo_id_ref ?? undefined,
+            nom: ligne.abo_nom_ref ?? undefined,
+            prix: ligne.abo_prix_ref ?? undefined,
+          }
+        : undefined
+    );
+  }
+
+  function closeAboModal() {
+    setAboModal({ open: false, groupKey: null });
+  }
+
   async function applyGroupStatutToLines(factureId: number, groupKey: string, value: StatutValeur) {
-    const [typeStr, netStr] = groupKey.split("|");
-    const groupType = Number(typeStr);
-    const targetNet = Number(netStr);
-    if (Number.isNaN(groupType) || Number.isNaN(targetNet)) return;
+    const group = ligneGroupesFacture.find((g) => g.group_key === groupKey);
+    const groupType = group?.match_type ?? null;
+    const targetNet = group?.match_net ?? null;
+    if (groupType === null || targetNet === null) return;
     try {
       const lignes = await listLignesFactures({ facture_id: factureId });
       const toUpdate = lignes.filter((lf) => {
@@ -898,6 +1455,107 @@ export default function CompteDetailModal({
   async function saveRapport() {
     if (!selectedFactureId) return;
     console.log("[RAPPORT][SAVE][START]", { factureId: selectedFactureId });
+    const groupAbos = factureGroupAbonnements[selectedFactureId] || {};
+    const groupStatuts = factureGroupStatuts[selectedFactureId] || {};
+    const contestedGroups = Object.entries(groupStatuts).filter(([, stat]) => stat.aboNet === "conteste");
+    const attachedSelections: Record<string, AbonnementSelection> = {};
+
+    if (contestedGroups.length > 0) {
+      let lignesFacture: any[] = [];
+      try {
+        lignesFacture = await listLignesFactures({ facture_id: selectedFactureId });
+      } catch (err) {
+        console.error("Impossible de récupérer les lignes de la facture", err);
+        alert((err as Error).message || "Impossible de charger les lignes de la facture");
+        return;
+      }
+      const missingAbos: string[] = [];
+
+      // Vérifie que chaque groupe contesté a une sélection d'abonnement
+      contestedGroups.forEach(([groupKey]) => {
+        const selection = groupAbos[groupKey];
+        const group = ligneGroupesFacture.find((g) => g.group_key === groupKey);
+        const label =
+          group?.abo_nom && group.abo_id
+            ? `${group.abo_nom} (${Number((group.match_net || 0)).toFixed(2)} €)`
+            : `${decodeLineType(group?.match_type ?? 3)} (${Number((group?.match_net || 0)).toFixed(2)} €)`;
+        if (!selection) {
+          missingAbos.push(label);
+        } else if (selection.mode === "existing" && !selection.abonnementId) {
+          missingAbos.push(label);
+        } else if (selection.mode === "new" && !selection.nom) {
+          missingAbos.push(label);
+        }
+      });
+
+      if (missingAbos.length > 0) {
+        alert(`Sélectionne un type d'abonnement pour chaque groupe contesté :\n- ${missingAbos.join("\n- ")}`);
+        return;
+      }
+
+      // Attache les abonnements aux lignes concernées
+      for (const [groupKey] of contestedGroups) {
+        const selection = groupAbos[groupKey];
+        if (!selection) continue;
+        const group = ligneGroupesFacture.find((g) => g.group_key === groupKey);
+        const groupType = group?.match_type ?? null;
+        const targetNet = group?.match_net ?? null;
+        if (groupType === null || targetNet === null) continue;
+        const lineIds = lignesFacture
+          .filter((lf) => {
+            const type = editedTypes[lf.ligne_id];
+            if (type === undefined || type === null) return false;
+            const netVal = Number((Number(lf.abo || 0) + Number(lf.remises || 0)).toFixed(2));
+            return type === groupType && Number(netVal.toFixed(2)) === Number(targetNet.toFixed(2));
+          })
+          .map((lf) => lf.ligne_id);
+
+        if (lineIds.length === 0) continue;
+        const attachPayload = {
+          ligne_ids: lineIds,
+          date: factureCourante?.facture_date || undefined,
+          prix: selection.prix ?? targetNet,
+          commentaire: selection.commentaire ?? undefined,
+        } as any;
+
+        if (selection.mode === "existing" && selection.abonnementId) {
+          attachPayload.abonnement_id = selection.abonnementId;
+        } else if (selection.mode === "new" && selection.nom) {
+          attachPayload.nom = selection.nom;
+        }
+
+        try {
+          const resp = await attachAbonnementToLines(attachPayload);
+          attachedSelections[groupKey] = {
+            mode: "existing",
+            abonnementId: resp.abonnement.id,
+            nom: resp.abonnement.nom,
+            prix: resp.abonnement.prix,
+            commentaire: resp.abonnement.commentaire ?? null,
+          };
+          setAbonnements((prev) => {
+            const existing = prev.find((a) => a.id === resp.abonnement.id);
+            if (existing) {
+              return prev.map((a) => (a.id === resp.abonnement.id ? resp.abonnement : a));
+            }
+            return [...prev, resp.abonnement].sort((a, b) => a.nom.localeCompare(b.nom));
+          });
+        } catch (err) {
+          console.error("Erreur attachement abonnement", err);
+          alert((err as Error).message || "Impossible d'attacher l'abonnement aux lignes");
+          return;
+        }
+      }
+
+      if (Object.keys(attachedSelections).length > 0) {
+        setFactureGroupAbonnements((prev) => ({
+          ...prev,
+          [selectedFactureId]: { ...(prev[selectedFactureId] || {}), ...attachedSelections },
+        }));
+      }
+    }
+
+    const finalGroupAbonnements = { ...groupAbos, ...attachedSelections };
     const payload = {
       facture_id: selectedFactureId,
       commentaire: factureCommentaires[selectedFactureId] || null,
@@ -910,6 +1568,7 @@ export default function CompteDetailModal({
         metricReals: factureMetricReals[selectedFactureId] || {},
         groupReals: factureGroupReals[selectedFactureId] || {},
         groupAnomalies: factureGroupAnomalies[selectedFactureId] || {},
+        groupAbonnements: finalGroupAbonnements,
       },
     };
     try {
@@ -1534,6 +2193,7 @@ export default function CompteDetailModal({
                         )}
                       </th>
                       <th style={{ padding: "0.75rem", textAlign: "left", fontWeight: "600" }}>Statut</th>
+                      <th style={{ padding: "0.75rem", textAlign: "left", fontWeight: "600" }}>Abonnement (réf)</th>
                           <th
                             style={{ padding: "0.75rem", textAlign: "right", fontWeight: "600", cursor: "pointer" }}
                             onClick={() =>
@@ -1654,6 +2314,18 @@ export default function CompteDetailModal({
                               </div>
                             </td>
                             <td style={{ padding: "0.75rem", color: "#374151" }}>{decodeLigneFactureStatus(ligne.ligne_statut)}</td>
+                            <td
+                              style={{ padding: "0.75rem", color: "#0f172a", cursor: "pointer" }}
+                              onClick={() => openAboFromLine(ligne)}
+                              title="Choisir / modifier l'abonnement"
+                            >
+                              <div style={{ fontWeight: 700 }}>{ligne.abo_nom_ref || "Non renseigné"}</div>
+                              <div style={{ color: "#6b7280", fontSize: "0.9rem" }}>
+                                {ligne.abo_prix_ref !== null && ligne.abo_prix_ref !== undefined
+                                  ? `${Number(ligne.abo_prix_ref || 0).toFixed(2)} €`
+                                  : ""}
+                              </div>
+                            </td>
                             <td style={{ padding: "0.75rem", textAlign: "right" }}>
                               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "0.15rem" }}>
                                  <span>{Number(ligne.abo || 0).toFixed(2)} €</span>
@@ -1954,12 +2626,13 @@ export default function CompteDetailModal({
                             <table style={{ width: "100%", minWidth: "1100px", borderCollapse: "separate", borderSpacing: 0, fontSize: "0.86rem", tableLayout: "auto" }}>
                               <thead>
                                 <tr style={{ background: "#f8fafc", color: "#0f172a" }}>
-                                  <th style={{ textAlign: "left", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Type</th>
-                                  <th style={{ textAlign: "right", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Lignes</th>
-                                  <th style={{ textAlign: "right", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Abo brut</th>
-                                  <th style={{ textAlign: "right", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Conso</th>
-                                  <th style={{ textAlign: "right", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Remises</th>
-                                  <th style={{ textAlign: "right", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Abo net unitaire</th>
+            <th style={{ textAlign: "left", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Type</th>
+            <th style={{ textAlign: "left", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Abonnement</th>
+            <th style={{ textAlign: "right", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Lignes</th>
+            <th style={{ textAlign: "right", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Abo brut</th>
+            <th style={{ textAlign: "right", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Conso</th>
+            <th style={{ textAlign: "right", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Remises</th>
+            <th style={{ textAlign: "right", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Abo net unitaire</th>
                                   <th style={{ textAlign: "left", padding: "0.65rem", borderBottom: "1px solid #e5e7eb", minWidth: "210px" }}>Statut abo net</th>
                                   <th style={{ textAlign: "right", padding: "0.65rem", borderBottom: "1px solid #e5e7eb" }}>Achats total</th>
                                   <th style={{ textAlign: "left", padding: "0.65rem", borderBottom: "1px solid #e5e7eb", minWidth: "210px" }}>Statut achats</th>
@@ -1969,9 +2642,10 @@ export default function CompteDetailModal({
                                 {ligneGroupesFacture.map((g, idx) => {
                                     const netUnitVal = g.count ? g.netAbo / g.count : Number(g.netAbo || 0);
                                     const achatUnit = g.count ? g.achat / g.count : Number(g.achat || 0);
-                                    const key = `${g.ligne_type}|${Number(netUnitVal || 0).toFixed(2)}`;
-                                    const groupPrice = Number(key.split("|")[1]);
+                                    const key = g.group_key;
+                                    const groupPrice = Number(g.match_net || netUnitVal || 0);
                                   const stat = factureGroupStatuts[factureCourante.facture_id]?.[key];
+                                  const aboSelection = factureGroupAbonnements[factureCourante.facture_id]?.[key];
                                   const comment = factureGroupComments[factureCourante.facture_id]?.[key]?.aboNet || "";
                                   const commentAchat = factureGroupComments[factureCourante.facture_id]?.[key]?.achat || "";
                                   const anomaliesForGroup = factureGroupAnomalies[factureCourante.facture_id]?.[key] || [];
@@ -1995,7 +2669,20 @@ export default function CompteDetailModal({
                                       <td style={{ padding: "0.65rem" }}>
                                         <div style={{ fontWeight: 700 }}>{decodeLineType(g.ligne_type)}</div>
                                       </td>
-                                      <td style={{ padding: "0.65rem", textAlign: "right", fontWeight: 700 }}>{g.count}</td>
+                                      <td
+                                        style={{ padding: "0.65rem", cursor: "pointer" }}
+                                        onClick={() => openAboModal(key)}
+                                      >
+                                        <div style={{ fontWeight: 800, color: "#0f172a" }}>
+                                          {g.abo_nom || aboSelection?.nom || "Non renseigné"}
+                                        </div>
+                                      </td>
+                                      <td
+                                        style={{ padding: "0.65rem", textAlign: "right", fontWeight: 700, cursor: "pointer" }}
+                                        onClick={() => openAboModal(key)}
+                                      >
+                                        {g.count}
+                                      </td>
                                        <td style={{ padding: "0.65rem", textAlign: "right" }}>{Number(g.abo || 0).toFixed(2)} €</td>
                                        <td style={{ padding: "0.65rem", textAlign: "right" }}>{Number(g.conso || 0).toFixed(2)} €</td>
                                        <td style={{ padding: "0.65rem", textAlign: "right", color: "#0f766e" }}>{Number(g.remises || 0).toFixed(2)} €</td>
@@ -2020,6 +2707,28 @@ export default function CompteDetailModal({
                                             onChange={(e) => updateGroupComment(factureCourante.facture_id, key, "aboNet", e.target.value)}
                                             style={{ width: "100%", padding: "0.42rem", borderRadius: "0.45rem", border: "1px solid #cbd5e1", minHeight: "60px", resize: "vertical", background: "#f8fafc" }}
                                           />
+                                          {(stat?.aboNet || "a_verifier") === "conteste" && (
+                                            <div style={{ padding: "0.5rem", borderRadius: "0.45rem", border: "1px dashed #cbd5e1", background: "#f9fafb", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                                              <div style={{ fontWeight: 800, color: "#0f172a" }}>
+                                                {aboSelection?.nom ? aboSelection.nom : "Abonnement non défini"}
+                                              </div>
+                                              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                                                <button
+                                                  onClick={() =>
+                                                    openAboModal(key, [], {
+                                                      aboId: g.abo_id || aboSelection?.abonnementId || undefined,
+                                                      nom: g.abo_nom || aboSelection?.nom || undefined,
+                                                      prix: g.match_net || aboSelection?.prix || undefined,
+                                                    })
+                                                  }
+                                                  style={{ padding: "0.45rem 0.75rem", borderRadius: "0.45rem", background: "#3b82f6", color: "white", border: "none", cursor: "pointer", fontWeight: 700 }}
+                                                >
+                                                  Choisir / éditer l'abonnement
+                                                </button>
+                                                {aboSelection?.mode === "new" && <span style={{ color: "#c2410c", fontSize: "0.9rem" }}>Nouveau type en cours de création</span>}
+                                              </div>
+                                            </div>
+                                          )}
                                         </div>
                                       </td>
                                        <td style={{ padding: "0.65rem", textAlign: "right", fontWeight: 700, color: "#b45309" }}>{Number(g.achat || 0).toFixed(2)} €</td>
@@ -2209,6 +2918,189 @@ export default function CompteDetailModal({
         </div>
 
         {/* Footer */}
+        {aboModal.open && modalGroupKey && selectedFactureId && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(15,23,42,0.45)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 9999,
+              padding: "1rem",
+            }}
+          >
+            <div
+              style={{
+                background: "#fff",
+                borderRadius: "0.75rem",
+                padding: "1.25rem",
+                boxShadow: "0 24px 60px rgba(15, 23, 42, 0.25)",
+                width: "min(640px, 96vw)",
+                maxHeight: "90vh",
+                overflowY: "auto",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
+                <div>
+                  <div style={{ fontSize: "0.9rem", color: "#6b7280" }}>Type d'abonnement pour</div>
+                  <div style={{ fontSize: "1.05rem", fontWeight: 800 }}>
+                    {decodeLineType(modalGroup ? modalGroup.ligne_type : 3)} — net unitaire {modalDefaultPrice.toFixed(2)} €
+                  </div>
+                </div>
+                <button
+                  onClick={closeAboModal}
+                  style={{ border: "none", background: "transparent", fontSize: "1.2rem", cursor: "pointer", color: "#6b7280" }}
+                  aria-label="Fermer"
+                >
+                  ×
+                </button>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "0.75rem" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+                  <label style={{ fontWeight: 700, color: "#0f172a" }}>Abonnement existant</label>
+                  <select
+                    value={
+                      modalSelection?.mode === "new"
+                        ? "new"
+                        : modalSelection?.abonnementId
+                        ? String(modalSelection.abonnementId)
+                        : ""
+                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === "new") {
+                        updateGroupAbonnement(selectedFactureId, modalGroupKey, {
+                          mode: "new",
+                          abonnementId: null,
+                          nom: modalSelection?.nom || "",
+                          prix: modalSelection?.prix ?? modalDefaultPrice,
+                        });
+                      } else {
+                        const id = val ? Number(val) : null;
+                        const abo = abonnements.find((a) => a.id === id);
+                        updateGroupAbonnement(selectedFactureId, modalGroupKey, {
+                          mode: "existing",
+                          abonnementId: id,
+                          nom: abo?.nom ?? null,
+                          prix: abo?.prix ?? null,
+                          commentaire: abo?.commentaire ?? null,
+                        });
+                      }
+                    }}
+                    style={{ padding: "0.6rem", borderRadius: "0.55rem", border: "1px solid #cbd5e1", background: "#f8fafc" }}
+                  >
+                    <option value="">{abonnementsLoading ? "Chargement..." : "Sélectionner"}</option>
+                    {abonnements.map((abo) => (
+                      <option key={abo.id} value={abo.id}>
+                        {abo.nom} ({Number(abo.prix || 0).toFixed(2)} €)
+                      </option>
+                    ))}
+                    <option value="new">+ Nouveau type...</option>
+                  </select>
+                </div>
+
+                {(modalSelection?.mode === "new" || (!modalSelection && abonnements.length === 0)) && (
+                  <>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                      <label style={{ fontWeight: 700, color: "#0f172a" }}>Nom du nouvel abonnement</label>
+                      <input
+                        type="text"
+                        placeholder="Nom"
+                        value={modalSelection?.nom || ""}
+                        onChange={(e) =>
+                          updateGroupAbonnement(selectedFactureId, modalGroupKey, {
+                            mode: "new",
+                            nom: e.target.value,
+                            prix: modalSelection?.prix ?? modalDefaultPrice,
+                          })
+                        }
+                        style={{ padding: "0.6rem", borderRadius: "0.55rem", border: "1px solid #cbd5e1", background: "#fff" }}
+                      />
+                    </div>
+                    <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                      <div style={{ flex: "1 1 200px", display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                        <label style={{ fontWeight: 700, color: "#0f172a" }}>Prix (HT)</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          placeholder={modalDefaultPrice ? modalDefaultPrice.toFixed(2) : "0.00"}
+                          value={
+                            modalSelection?.prix === null || modalSelection?.prix === undefined
+                              ? ""
+                              : modalSelection.prix
+                          }
+                          onChange={(e) =>
+                            updateGroupAbonnement(selectedFactureId, modalGroupKey, {
+                              mode: "new",
+                              prix: e.target.value === "" ? null : Number(e.target.value),
+                            })
+                          }
+                          style={{ padding: "0.6rem", borderRadius: "0.55rem", border: "1px solid #cbd5e1", background: "#fff" }}
+                        />
+                      </div>
+                      <div style={{ flex: "1 1 200px", display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                        <label style={{ fontWeight: 700, color: "#0f172a" }}>Commentaire (optionnel)</label>
+                        <textarea
+                          placeholder="Notes sur l'abonnement"
+                          value={modalSelection?.commentaire || ""}
+                          onChange={(e) =>
+                            updateGroupAbonnement(selectedFactureId, modalGroupKey, {
+                              mode: "new",
+                              commentaire: e.target.value,
+                            })
+                          }
+                          style={{
+                            padding: "0.6rem",
+                            borderRadius: "0.55rem",
+                            border: "1px solid #cbd5e1",
+                            background: "#fff",
+                            minHeight: "80px",
+                            resize: "vertical",
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "0.5rem" }}>
+                  <button
+                    onClick={() => modalGroupKey && persistAbonnementForGroup(modalGroupKey, aboModal.lineIds)}
+                    disabled={aboModalSaving || !modalGroupKey}
+                    style={{
+                      padding: "0.65rem 1rem",
+                      background: aboModalSaving ? "#93c5fd" : "#2563eb",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "0.45rem",
+                      cursor: aboModalSaving ? "not-allowed" : "pointer",
+                      fontWeight: 700,
+                    }}
+                  >
+                    {aboModalSaving ? "Enregistrement..." : "Enregistrer l'abonnement"}
+                  </button>
+                  <button
+                    onClick={closeAboModal}
+                    style={{
+                      padding: "0.65rem 1rem",
+                      background: "#3b82f6",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "0.45rem",
+                      cursor: "pointer",
+                      fontWeight: 700,
+                    }}
+                  >
+                    Fermer
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
         <div
           style={{
             padding: "1rem 1.5rem",
