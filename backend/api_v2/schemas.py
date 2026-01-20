@@ -212,6 +212,9 @@ class FactureDetailLine(BaseModel):
     achat: float
     total_ht: float
     statut: int
+    abo_id_ref: Optional[int] = None
+    abo_nom_ref: Optional[str] = None
+    abo_prix_ref: Optional[float] = None
 
 
 class FactureDetail(BaseModel):
@@ -221,12 +224,43 @@ class FactureDetail(BaseModel):
     abonnements: List[Dict[str, Any]]
 
 
+class LigneGroupe(BaseModel):
+    facture_id: int
+    group_key: str
+    ligne_type: int
+    abo_id_ref: Optional[int] = None
+    abo_nom_ref: Optional[str] = None
+    prix_abo: float
+    count: int
+    abo: float
+    remises: float
+    netAbo: float
+    conso: float
+    achat: float
+    total: float
+
+
+class FactureResume(BaseModel):
+    facture_id: int
+    facture_num: str
+    facture_date: str
+    total_ht: float
+    lignes_total: float
+    abo: float
+    conso: float
+    remises: float
+    achat: float
+    ecart: float
+
+
 class FactureDetailStats(BaseModel):
     stats_globales: Dict[str, float]
     stats_globales_prev: Optional[Dict[str, float]] = None
     months: List[Dict[str, Any]]
     lignes_by_id: Dict[int, Dict[str, Any]]
     facture_detail: FactureDetail
+    ligne_groupes: List[LigneGroupe] = []
+    factures_resume: List[FactureResume] = []
 
 
 class AutoVerifResult(BaseModel):
@@ -235,3 +269,29 @@ class AutoVerifResult(BaseModel):
     commentaire: str
     rows_missing_count: int = 0
     details: Optional[Dict[str, Any]] = None
+
+
+class AutoVerifGroupStatut(BaseModel):
+    aboNet: str
+    achat: str
+
+
+class AutoVerifAnomaly(BaseModel):
+    kind: str
+    line: Optional[str] = None
+    detail: str
+    prev_net: Optional[float] = None
+    curr_net: Optional[float] = None
+    prev_achat: Optional[float] = None
+    curr_achat: Optional[float] = None
+
+
+class AutoVerifFullResult(BaseModel):
+    metricStatuts: Dict[str, str]
+    metricComments: Dict[str, str]
+    metricReals: Dict[str, str]
+    groupStatuts: Dict[str, AutoVerifGroupStatut]
+    groupComments: Dict[str, Dict[str, Optional[str]]]
+    groupAnomalies: Dict[str, List[AutoVerifAnomaly]]
+    summary: Dict[str, Any]
+    previousFactureNum: Optional[str] = None

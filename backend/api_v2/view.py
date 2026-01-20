@@ -245,6 +245,18 @@ def facture_detail(facture_id: int, db: Session = Depends(get_db)):
         .filter(LigneFacture.facture_id == facture_id)
         .all()
     )
+    # Abonnements principaux par ligne (si existants)
+    abo_links = (
+        db.query(LigneAbonnement, Abonnement)
+        .join(Abonnement, LigneAbonnement.abonnement_id == Abonnement.id)
+        .filter(LigneAbonnement.ligne_id.in_([lf.ligne_id for lf, _ in lignes]))
+        .order_by(LigneAbonnement.date.desc())
+        .all()
+    )
+    abo_map = {}
+    for la, ab in abo_links:
+        if la.ligne_id not in abo_map:  # conserve le plus recent
+            abo_map[la.ligne_id] = ab
     detail_lines = [
         FactureDetailLine(
             ligne_facture_id=lf.id,
@@ -257,6 +269,9 @@ def facture_detail(facture_id: int, db: Session = Depends(get_db)):
             achat=float(lf.achat),
             total_ht=lf.total_ht,
             statut=lf.statut,
+            abo_id_ref=abo_map.get(ligne.id).id if abo_map.get(ligne.id) else None,
+            abo_nom_ref=abo_map.get(ligne.id).nom if abo_map.get(ligne.id) else None,
+            abo_prix_ref=float(abo_map.get(ligne.id).prix) if abo_map.get(ligne.id) else None,
         )
         for lf, ligne in lignes
     ]
@@ -310,6 +325,40 @@ def facture_detail_stats(facture_id: int, db: Session = Depends(get_db)):
     facture = db.query(Facture).filter(Facture.id == facture_id).first()
     if not facture:
         raise HTTPException(status_code=404, detail="Facture introuvable")
+    # Groupes de lignes (abonnement si present, sinon type + net unitaire)
+    groupes_map: Dict[str, Dict[str, float | int | str | None]] = {}
+    for lf in base_detail.lignes:
+        net_unit = round(lf.abo + lf.remises, 2)
+        group_type = lf.ligne_type
+        if lf.abo_id_ref:
+            key = f"abo|{lf.abo_id_ref}|{group_type}|{net_unit}"
+        else:
+            key = f"price|{group_type}|{net_unit}"
+        if key not in groupes_map:
+            groupes_map[key] = {
+                "facture_id": facture_id,
+                "group_key": key,
+                "ligne_type": group_type,
+                "abo_id_ref": lf.abo_id_ref,
+                "abo_nom_ref": lf.abo_nom_ref,
+                "prix_abo": float(lf.abo_prix_ref or net_unit),
+                "count": 0,
+                "abo": 0.0,
+                "remises": 0.0,
+                "netAbo": 0.0,
+                "conso": 0.0,
+                "achat": 0.0,
+                "total": 0.0,
+            }
+        g = groupes_map[key]
+        g["count"] = int(g["count"]) + 1  # type: ignore
+        g["abo"] = float(g["abo"]) + lf.abo  # type: ignore
+        g["remises"] = float(g["remises"]) + lf.remises  # type: ignore
+        g["netAbo"] = float(g["netAbo"]) + lf.abo + lf.remises  # type: ignore
+        g["conso"] = float(g["conso"]) + lf.conso  # type: ignore
+        g["achat"] = float(g["achat"]) + lf.achat  # type: ignore
+        g["total"] = float(g["total"]) + lf.total_ht  # type: ignore
+    ligne_groupes = list(groupes_map.values())
     # Stats globales pour ce compte/mois
     stats_row = (
         db.query(
@@ -390,7 +439,27 @@ def facture_detail_stats(facture_id: int, db: Session = Depends(get_db)):
             "total_ht": lf.total_ht,
             "statut": lf.statut,
             "ligne_type": lf.ligne_type,
+            "abo_id_ref": lf.abo_id_ref,
+            "abo_nom_ref": lf.abo_nom_ref,
+            "abo_prix_ref": lf.abo_prix_ref,
         }
+
+    # Resume facture (totaux lignes vs facture)
+    lignes_total_ht = sum(lf.total_ht for lf in base_detail.lignes)
+    factures_resume = [
+        {
+            "facture_id": facture.id,
+            "facture_num": facture.num,
+            "facture_date": facture.date.isoformat(),
+            "total_ht": float(facture.total_ht),
+            "lignes_total": float(lignes_total_ht),
+            "abo": float(facture.abo),
+            "conso": float(facture.conso),
+            "remises": float(facture.remises),
+            "achat": float(facture.achat),
+            "ecart": float(facture.total_ht - lignes_total_ht),
+        }
+    ]
     logger.info("Detail-stats facture id=%s lignes=%s months=%s", facture_id, len(base_detail.lignes), len(months))
     return FactureDetailStats(
         stats_globales=stats_globales,
@@ -398,6 +467,8 @@ def facture_detail_stats(facture_id: int, db: Session = Depends(get_db)):
         months=months,
         lignes_by_id=lignes_map,
         facture_detail=base_detail,
+        ligne_groupes=ligne_groupes,
+        factures_resume=factures_resume,
     )
 
 

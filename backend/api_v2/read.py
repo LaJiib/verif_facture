@@ -8,7 +8,6 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
-from sqlalchemy import text
 
 from ..database import get_db
 from ..models import (
@@ -215,19 +214,6 @@ def list_facture_abonnements(facture_id: int, db: Session = Depends(get_db)):
             }
         )
     return result
-
-
-@router.post("/query")
-def execute_query(payload: dict, db: Session = Depends(get_db)):
-    sql = payload.get("sql")
-    if not sql or not sql.strip():
-        raise HTTPException(status_code=400, detail="SQL requis")
-    lowered = sql.strip().lower()
-    if not lowered.startswith("select"):
-        raise HTTPException(status_code=400, detail="Seules les requêtes SELECT sont autorisées.")
-    rows = db.execute(text(sql)).mappings().all()
-    logger.info("Query exécutée rows=%s", len(rows))
-    return {"data": [dict(r) for r in rows], "count": len(rows)}
 
 
 @router.get("/uploads/{upload_id}/download")

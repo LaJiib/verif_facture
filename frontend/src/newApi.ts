@@ -182,6 +182,27 @@ export async function autoVerifyEcart(factureId: number): Promise<AutoVerifEcart
 // API CALL - LIGNES-FACTURES (statut / mise à jour simple)
 // ============================================================================
 
+export interface AutoVerifFullResult {
+  metricStatuts: Record<string, string>;
+  metricComments: Record<string, string>;
+  metricReals: Record<string, string>;
+  groupStatuts: Record<string, { aboNet: string; achat: string }>;
+  groupComments: Record<string, { aboNet?: string; achat?: string }>;
+  groupAnomalies: Record<string, { kind: string; line?: string; detail: string; prev_net?: number; curr_net?: number; prev_achat?: number; curr_achat?: number }[]>;
+  summary: { added: number; removed: number; modified: number; previousFactureId: number | null; previousFactureNum?: string | null };
+  previousFactureNum?: string | null;
+}
+
+export async function autoVerifyFull(factureId: number): Promise<AutoVerifFullResult> {
+  logApi("autoVerifyFull", { factureId });
+  const res = await fetch(`${V2_USECASE}/autoverif/full?facture_id=${factureId}`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(body || "Erreur auto verification complete");
+  }
+  return res.json() as Promise<AutoVerifFullResult>;
+}
+
 export interface LigneFacture {
   id: number;
   facture_id: number;
@@ -238,6 +259,9 @@ export interface FactureDetail {
     achat: number;
     total_ht: number;
     statut: number;
+    abo_id_ref?: number | null;
+    abo_nom_ref?: string | null;
+    abo_prix_ref?: number | null;
   }[];
   abonnements: any[];
 }
@@ -263,9 +287,39 @@ export interface FactureDetailStats {
       total_ht: number;
       statut: number;
       ligne_type: number;
+      abo_id_ref?: number | null;
+      abo_nom_ref?: string | null;
+      abo_prix_ref?: number | null;
     }
   >;
   facture_detail: FactureDetail;
+  ligne_groupes?: {
+    facture_id: number;
+    group_key: string;
+    ligne_type: number;
+    abo_id_ref?: number | null;
+    abo_nom_ref?: string | null;
+    prix_abo: number;
+    count: number;
+    abo: number;
+    remises: number;
+    netAbo: number;
+    conso: number;
+    achat: number;
+    total: number;
+  }[];
+  factures_resume?: {
+    facture_id: number;
+    facture_num: string;
+    facture_date: string;
+    total_ht: number;
+    lignes_total: number;
+    abo: number;
+    conso: number;
+    remises: number;
+    achat: number;
+    ecart: number;
+  }[];
 }
 
 // Dashboard entreprise
@@ -625,16 +679,6 @@ export async function upsertFactureRapport(payload: {
 // ============================================================================
 // API CALL - REQUÊTE SQL PERSONNALISÉE
 // ============================================================================
-
-export async function executeQuery(sql: string): Promise<{ data: any[]; count: number }> {
-  logApi("executeQuery", { length: sql.length });
-  const res = await fetch(`${V2_READ}/query`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sql }),
-  });
-  return handleResponse<{ data: any[]; count: number }>(res);
-}
 
 // ============================================================================
 // API CALL - LIGNES

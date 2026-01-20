@@ -10,10 +10,13 @@ from sqlalchemy import func
 
 from ..database import get_db
 from ..models import Facture, LigneFacture, Ligne
-from .schemas import AutoVerifResult
+from .schemas import AutoVerifResult, AutoVerifFullResult
+from .autoverif import compute_auto_verif_full
 
 router = APIRouter(prefix="/v2/usecase", tags=["usecase"])
 logger = logging.getLogger("api_v2.usecase")
+
+STATUT_IMPORTE = 0
 
 
 @router.post("/autoverif/ecart", response_model=AutoVerifResult)
@@ -33,7 +36,7 @@ def auto_verify_ecart(facture_id: int, db: Session = Depends(get_db)):
     )
     total_lignes = float(sums.total_lignes or 0)
     total_facture = facture.total_ht
-    ecart = round(total_lignes - total_facture, 2)
+    ecart = round(total_facture - total_lignes, 2)
     statut = "valide" if abs(ecart) < 0.01 else "conteste"
     commentaire = "OK" if statut == "valide" else f"Écart détecté ({ecart:+.2f} €)"
 
@@ -56,6 +59,12 @@ def auto_verify_ecart(facture_id: int, db: Session = Depends(get_db)):
     )
     logger.info("Auto-verif facture_id=%s statut=%s ecart=%.2f", facture_id, statut, ecart)
     return result
+
+
+@router.post("/autoverif/full", response_model=AutoVerifFullResult)
+def auto_verify_full(facture_id: int, db: Session = Depends(get_db)):
+    """Auto-vérification complète orchestrée côté backend (plus d'accès SQL brut côté frontend)."""
+    return compute_auto_verif_full(facture_id, db)
 
 
 @router.post("/llm/summarize")

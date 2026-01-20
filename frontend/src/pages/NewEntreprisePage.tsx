@@ -1,184 +1,154 @@
-import React from "react";
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  deleteFacture,
+  fetchEntrepriseMatrice,
+  fetchFactures,
   getEntreprise,
   updateCompte,
-  deleteFacture,
-  fetchFactures,
   type Entreprise,
-  type Facture,
-  fetchEntrepriseMatrice,
 } from "../newApi";
-
 import { decodeFactureStatus } from "../utils/codecs";
-import { exportLotRecapPdf } from "../utils/pdfReport";
 import { StatusBar } from "../utils/statusBar";
 import CompteDetailModal from "../components/CompteDetailModal";
-
-function useViewportWidth(): number {
-  const [width, setWidth] = useState<number>(() => (typeof window !== "undefined" ? window.innerWidth : 1280));
-  useEffect(() => {
-    const handler = () => setWidth(window.innerWidth);
-    window.addEventListener("resize", handler);
-    return () => window.removeEventListener("resize", handler);
-  }, []);
-  return width;
-}
-
-interface EntreprisePageProps {
-  entrepriseId: number;
-  onBack: () => void;
-}
 
 interface MoisData {
   mois: string;
   date_key: string;
 }
 
-interface FactureInfo {
+interface FactureItem {
   facture_id: number;
-  num: string;
+  facture_num: string;
   statut: number;
-}
-
-interface CompteData {
+  date_key: string;
+  lot: string;
   compte_id: number;
   compte_num: string;
   compte_nom: string | null;
-  lot: string;
-  montants_par_mois: Map<string, number>; // date_key -> total_ht
-  factures_par_mois: Map<string, FactureInfo[]>; // date_key -> liste des factures
-  montants_detail_par_mois: Map<string, { abo: number; conso: number; remises: number; achat: number }>;
+  abo: number;
+  conso: number;
+  remises: number;
+  achat: number;
+  total: number;
 }
+
+interface TreeCompte {
+  compte_id: number;
+  compte_num: string;
+  compte_nom: string | null;
+  stats: Record<number, number>;
+}
+
+interface TreeLot {
+  lot: string;
+  stats: Record<number, number>;
+  comptes: TreeCompte[];
+}
+
+type FilterNode =
+  | { type: "entreprise" }
+  | { type: "lot"; lot: string }
+  | { type: "compte"; lot: string; compte_id: number };
 
 interface DetailModalData {
   compte_id: number;
   compte_num: string;
   compte_nom: string | null;
-  mois?: string; // Si fourni, filtre sur ce mois
+  mois?: string;
 }
 
-interface LotData {
-  lot: string;
-  expanded: boolean;
-  total_par_mois: Map<string, number>;
-  statuts_par_mois: Map<string, Record<number, number>>; // Statistiques de statut par mois
-  comptes: CompteData[];
+const EMPTY_STATS: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
+
+function cloneStats(stats?: Record<number, number>): Record<number, number> {
+  return {
+    0: stats?.[0] || 0,
+    1: stats?.[1] || 0,
+    2: stats?.[2] || 0,
+  };
+}
+
+function formatMois(dateKey: string): string {
+  const [year, month] = dateKey.split("-");
+  const moisMap: { [key: string]: string } = {
+    "01": "Jan",
+    "02": "Fev",
+    "03": "Mar",
+    "04": "Avr",
+    "05": "Mai",
+    "06": "Juin",
+    "07": "Juil",
+    "08": "Aout",
+    "09": "Sep",
+    "10": "Oct",
+    "11": "Nov",
+    "12": "Dec",
+  };
+  return `${moisMap[month]} ${year}`;
+}
+
+function formatStatutPercentage(stats: Record<number, number>): string {
+  const total = (stats[0] || 0) + (stats[1] || 0) + (stats[2] || 0);
+  if (total === 0) return "Aucune facture";
+
+  const parts: string[] = [];
+  if (stats[1]) parts.push(`${Math.round((stats[1] / total) * 100)}% valide`);
+  if (stats[2]) parts.push(`${Math.round((stats[2] / total) * 100)}% conteste`);
+  if (stats[0]) parts.push(`${Math.round((stats[0] / total) * 100)}% importe`);
+  return parts.join(" · ");
+}
+
+function statutMeta(statut: number) {
+  switch (statut) {
+    case 1:
+      return { label: "Valide", color: "#10b981", bg: "#ecfdf3" };
+    case 2:
+      return { label: "Conteste", color: "#f59e0b", bg: "#fffbeb" };
+    case 0:
+    default:
+      return { label: "Importe", color: "#9ca3af", bg: "#f3f4f6" };
+  }
 }
 
 export default function EntreprisePage({
   entrepriseId,
   onBack,
-}: EntreprisePageProps) {
+}: {
+  entrepriseId: number;
+  onBack: () => void;
+}) {
   const [entreprise, setEntreprise] = useState<Entreprise | null>(null);
   const [moisData, setMoisData] = useState<MoisData[]>([]);
-  const [moisOrder, setMoisOrder] = useState<"asc" | "desc">("asc");
-  const [selectedMonths, setSelectedMonths] = useState<Set<string>>(new Set());
-  const [lotsData, setLotsData] = useState<LotData[]>([]);
+  const [factures, setFactures] = useState<FactureItem[]>([]);
+  const [treeLots, setTreeLots] = useState<TreeLot[]>([]);
+  const [globalStats, setGlobalStats] = useState<Record<number, number>>(EMPTY_STATS);
+  const [selectedNode, setSelectedNode] = useState<FilterNode>({ type: "entreprise" });
+  const [compteMonthsMap, setCompteMonthsMap] = useState<Map<number, Set<string>>>(new Map());
+  const [selectedStatutsFilter, setSelectedStatutsFilter] = useState<Set<number>>(new Set([0, 1, 2]));
+  const [selectedCompte, setSelectedCompte] = useState<DetailModalData | null>(null);
+  const [editCompte, setEditCompte] = useState<{
+    compte_id: number;
+    compte_num: string;
+    compte_nom: string | null;
+    lot: string | null;
+    nomValue: string;
+    lotValue: string;
+  } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [editCompte, setEditCompte] = useState<{
-    compte: CompteData;
-    nom: string;
-    lot: string;
-  } | null>(null);
-  const [exportLot, setExportLot] = useState<{ lot: string; months: Set<string> } | null>(null);
-
-  // Modal de detail
-  const [selectedCompte, setSelectedCompte] = useState<DetailModalData | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [selectedStatutsFilter, setSelectedStatutsFilter] = useState<Set<number>>(new Set([0, 1, 2]));
-  const [showMonthsDropdown, setShowMonthsDropdown] = useState(false);
-  const [showStatutsDropdown, setShowStatutsDropdown] = useState(false);
-  const [logoDataUrl, setLogoDataUrl] = useState<string | null>(null);
-  const [logoSizeMm, setLogoSizeMm] = useState<{ width: number; height: number } | null>(null);
-  const viewportWidth = useViewportWidth();
-  const isWideTable = viewportWidth >= 1400;
-  const isUltraWideTable = viewportWidth >= 1800;
-  // On privilegie l'affichage du maximum de colonnes : padding compact et colonne sticky resserree
-  const cellPadding = isUltraWideTable ? "0.55rem" : isWideTable ? "0.5rem" : "0.45rem";
-  const stickyColWidth = isUltraWideTable ? "200px" : isWideTable ? "180px" : "170px";
-  const tableFontSize = isWideTable ? "0.85rem" : "0.82rem";
-  const tableMaxHeight = isWideTable ? "calc(100vh - 200px)" : "calc(100vh - 240px)";
-  const moisAffiches = useMemo(
-    () =>
-      [...moisData].sort((a, b) =>
-        moisOrder === "asc" ? a.date_key.localeCompare(b.date_key) : b.date_key.localeCompare(a.date_key)
-      ),
-    [moisData, moisOrder]
-  );
-  const moisEligibles = useMemo(
-    () =>
-      moisAffiches.filter((m) =>
-        lotsData.some((lot) =>
-          lot.comptes.some((c) =>
-            (c.factures_par_mois.get(m.date_key) || []).some((f) => selectedStatutsFilter.has(f.statut))
-          )
-        )
-      ),
-    [moisAffiches, lotsData, selectedStatutsFilter]
-  );
-  const moisFiltres = useMemo(() => {
-    const eligibleKeys = new Set(moisEligibles.map((m) => m.date_key));
-    const base =
-      selectedMonths.size === 0
-        ? moisEligibles
-        : moisEligibles.filter((m) => selectedMonths.has(m.date_key) && eligibleKeys.has(m.date_key));
-    return base;
-  }, [moisEligibles, selectedMonths]);
+  const [collapsedLots, setCollapsedLots] = useState<Set<string>>(new Set());
+  const [collapsedMonths, setCollapsedMonths] = useState<Set<string>>(new Set());
+  const firstLoadRef = useRef(true);
 
   useEffect(() => {
     loadData();
   }, [entrepriseId]);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function loadLogo() {
-      try {
-        const res = await fetch("/actice_logo.png");
-        if (!res.ok) return;
-        const blob = await res.blob();
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          if (cancelled || typeof reader.result !== "string") return;
-          const dataUrl = reader.result;
-          const img = new Image();
-          img.onload = () => {
-            if (cancelled) return;
-            const targetHeightMm = 12;
-            const ratio = img.width > 0 ? img.height / img.width : 0.4;
-            const heightMm = targetHeightMm;
-            const widthMm = ratio > 0 ? targetHeightMm / ratio : targetHeightMm * 1.8;
-            setLogoDataUrl(dataUrl);
-            setLogoSizeMm({ width: widthMm, height: heightMm });
-          };
-          img.src = dataUrl;
-        };
-        reader.readAsDataURL(blob);
-      } catch (err) {
-        console.warn("Logo non charge", err);
-      }
-    }
-    loadLogo();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    const eligibleKeys = new Set(moisEligibles.map((m) => m.date_key));
-    // Synchronise toujours la selection sur les mois eligibles (affiches) selon le filtre statut
-    setSelectedMonths(new Set(eligibleKeys));
-  }, [moisEligibles]);
-
-  async function loadData(preserveExpanded: boolean = false) {
+  async function loadData(preserveSelection: boolean = true) {
     setIsLoading(true);
     setError(null);
-    try {
-      const expandedLots = preserveExpanded
-        ? new Set(lotsData.filter((l) => l.expanded).map((l) => l.lot))
-        : new Set<string>();
 
+    try {
       const entrepriseData = await getEntreprise(entrepriseId);
       setEntreprise(entrepriseData);
 
@@ -189,69 +159,81 @@ export default function EntreprisePage({
         mois: formatMois(m),
       }));
       setMoisData(moisList);
-      setSelectedMonths(new Set(matrice.months || []));
 
-      const lotsList: LotData[] = matrice.lots
-        .map((lot) => {
-          const lotTotals = new Map<string, number>();
-          Object.entries(lot.totals_by_month || {}).forEach(([k, v]) => lotTotals.set(k, Number(v || 0)));
+      const flatFactures: FactureItem[] = [];
+      const lotsForTree: TreeLot[] = [];
+      const monthsMap = new Map<number, Set<string>>();
+      const global: Record<number, number> = cloneStats(EMPTY_STATS);
 
-          const lotStatuts = new Map<string, Record<number, number>>();
-          Object.entries(lot.statuts_by_month || {}).forEach(([k, v]) => {
-            const parsed: Record<number, number> = {};
-            Object.entries(v || {}).forEach(([st, val]) => {
-              parsed[Number(st)] = Number(val || 0);
-            });
-            lotStatuts.set(k, parsed);
-          });
+      matrice.lots.forEach((lot) => {
+        const lotStats: Record<number, number> = cloneStats();
+        const comptes: TreeCompte[] = lot.comptes.map((compte) => {
+          const compteStats: Record<number, number> = cloneStats();
 
-          const comptes: CompteData[] = lot.comptes.map((c) => {
-            const montantsParMois = new Map<string, number>();
-            const facturesParMois = new Map<string, FactureInfo[]>();
-            const montantsDetailParMois = new Map<string, { abo: number; conso: number; remises: number; achat: number }>();
-
-            (c.factures || []).forEach((f) => {
-              const dk = f.date_key;
-              const currentTotal = montantsParMois.get(dk) || 0;
-              montantsParMois.set(dk, currentTotal + (Number(f.total_ht) || 0));
-
-              const detail = montantsDetailParMois.get(dk) || { abo: 0, conso: 0, remises: 0, achat: 0 };
-              detail.abo += Number(f.abo || 0);
-              detail.conso += Number(f.conso || 0);
-              detail.remises += Number(f.remises || 0);
-              detail.achat += Number(f.achat || 0);
-              montantsDetailParMois.set(dk, detail);
-
-              if (!facturesParMois.has(dk)) facturesParMois.set(dk, []);
-              facturesParMois.get(dk)!.push({
-                facture_id: f.facture_id,
-                num: f.facture_num,
-                statut: f.statut,
-              });
-            });
-
-            return {
-              compte_id: c.compte_id,
-              compte_num: c.compte_num,
-              compte_nom: c.compte_nom,
+          compte.factures.forEach((f) => {
+            const item: FactureItem = {
+              facture_id: f.facture_id,
+              facture_num: f.facture_num,
+              statut: f.statut,
+              date_key: f.date_key,
               lot: lot.lot,
-              montants_par_mois: montantsParMois,
-              factures_par_mois: facturesParMois,
-              montants_detail_par_mois: montantsDetailParMois,
+              compte_id: compte.compte_id,
+              compte_num: compte.compte_num,
+              compte_nom: compte.compte_nom,
+              abo: Number(f.abo || 0),
+              conso: Number(f.conso || 0),
+              remises: Number(f.remises || 0),
+              achat: Number(f.achat || 0),
+              total: Number(f.total_ht || 0),
             };
+            flatFactures.push(item);
+
+            compteStats[f.statut] = (compteStats[f.statut] || 0) + 1;
+            lotStats[f.statut] = (lotStats[f.statut] || 0) + 1;
+            global[f.statut] = (global[f.statut] || 0) + 1;
+
+            if (!monthsMap.has(compte.compte_id)) {
+              monthsMap.set(compte.compte_id, new Set());
+            }
+            monthsMap.get(compte.compte_id)!.add(f.date_key);
           });
 
           return {
-            lot: lot.lot,
-            expanded: expandedLots.has(lot.lot),
-            total_par_mois: lotTotals,
-            statuts_par_mois: lotStatuts,
-            comptes,
+            compte_id: compte.compte_id,
+            compte_num: compte.compte_num,
+            compte_nom: compte.compte_nom,
+            stats: compteStats,
           };
-        })
-        .sort((a, b) => a.lot.localeCompare(b.lot));
+        });
 
-      setLotsData(lotsList);
+        lotsForTree.push({
+          lot: lot.lot,
+          stats: lotStats,
+          comptes,
+        });
+      });
+
+      flatFactures.sort((a, b) => b.date_key.localeCompare(a.date_key));
+      lotsForTree.sort((a, b) => a.lot.localeCompare(b.lot));
+
+      setFactures(flatFactures);
+      setTreeLots(lotsForTree);
+      setCompteMonthsMap(monthsMap);
+      setGlobalStats(global);
+      if (firstLoadRef.current) {
+        setCollapsedLots(new Set(lotsForTree.map((l) => l.lot)));
+        setCollapsedMonths(new Set(moisList.map((m) => m.date_key)));
+        firstLoadRef.current = false;
+      }
+
+      if (!preserveSelection) {
+        setSelectedNode({ type: "entreprise" });
+      } else {
+        const stillValid = checkSelectedNode(selectedNode, lotsForTree);
+        if (!stillValid) {
+          setSelectedNode({ type: "entreprise" });
+        }
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -259,8 +241,44 @@ export default function EntreprisePage({
     }
   }
 
+  function toggleLotCollapse(lotName: string) {
+    setCollapsedLots((prev) => {
+      const next = new Set(prev);
+      if (next.has(lotName)) next.delete(lotName);
+      else next.add(lotName);
+      return next;
+    });
+  }
 
-  // Mise a jour ciblee apres validation d'un rapport (evite de reconstruire toute la page)
+  function toggleMonthCollapse(dateKey: string) {
+    setCollapsedMonths((prev) => {
+      const next = new Set(prev);
+      if (next.has(dateKey)) next.delete(dateKey);
+      else next.add(dateKey);
+      return next;
+    });
+  }
+
+  function checkSelectedNode(node: FilterNode, lots: TreeLot[]): boolean {
+    if (node.type === "entreprise") return true;
+    if (node.type === "lot") return lots.some((l) => l.lot === node.lot);
+    if (node.type === "compte") {
+      return lots.some(
+        (l) => l.lot === node.lot && l.comptes.some((c) => c.compte_id === node.compte_id)
+      );
+    }
+    return false;
+  }
+
+  function handleFactureClick(item: FactureItem) {
+    setSelectedCompte({
+      compte_id: item.compte_id,
+      compte_num: item.compte_num,
+      compte_nom: item.compte_nom,
+      mois: item.date_key,
+    });
+  }
+
   function handleFactureStatusUpdate({
     factureId,
     newStatut,
@@ -272,162 +290,51 @@ export default function EntreprisePage({
     mois?: string;
     compteId: number;
   }) {
-    setLotsData((prevLots) =>
-      prevLots.map((lot) => {
-        const comptes = lot.comptes.map((compte) => {
-          if (compte.compte_id !== compteId) return compte;
-          const facturesMap = new Map(compte.factures_par_mois);
-          const statutsMap = new Map(lot.statuts_par_mois);
+    const target = factures.find((f) => f.facture_id === factureId);
+    if (!target) return;
+    if (target.statut === newStatut) return;
+    const oldStatut = target.statut;
 
-          if (mois) {
-            const factures = facturesMap.get(mois) || [];
-            let oldStatut: number | null = null;
-            const updatedFactures = factures.map((f) => {
-              if (f.facture_id === factureId) {
-                oldStatut = f.statut;
-                return { ...f, statut: newStatut };
-              }
-              return f;
-            });
-            facturesMap.set(mois, updatedFactures);
-
-            if (oldStatut !== null) {
-              const stats = { ...(statutsMap.get(mois) || { 0: 0, 1: 0, 2: 0 }) };
-              stats[oldStatut] = Math.max(0, (stats[oldStatut] || 0) - 1);
-              stats[newStatut] = (stats[newStatut] || 0) + 1;
-              statutsMap.set(mois, stats);
-            }
-          }
-
-          return {
-            ...compte,
-            factures_par_mois: facturesMap,
-          };
-        });
-        return { ...lot, comptes: comptes };
-      })
+    setFactures((prev) =>
+      prev.map((f) => (f.facture_id === factureId ? { ...f, statut: newStatut } : f))
     );
-  }
 
-  function formatMois(dateKey: string): string {
-    const [year, month] = dateKey.split("-");
-    const moisMap: { [key: string]: string } = {
-      "01": "Jan", "02": "Fev", "03": "Mar", "04": "Avr",
-      "05": "Mai", "06": "Juin", "07": "Juil", "08": "Aout",
-      "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dec",
-    };
-    return `${moisMap[month]} ${year}`;
-  }
-
-  function toggleLot(lotName: string) {
-    setLotsData(
-      lotsData.map((lot) =>
-        lot.lot === lotName ? { ...lot, expanded: !lot.expanded } : lot
-      )
-    );
-  }
-
-  function toggleMonthVisible(dateKey: string) {
-    setSelectedMonths((prev) => {
-      const next = new Set(prev);
-      if (next.has(dateKey)) {
-        next.delete(dateKey);
-      } else {
-        next.add(dateKey);
-      }
+    setGlobalStats((prev) => {
+      const next = cloneStats(prev);
+      next[oldStatut] = Math.max(0, (next[oldStatut] || 0) - 1);
+      next[newStatut] = (next[newStatut] || 0) + 1;
       return next;
     });
-  }
 
-  function setAllMonthsVisible(all: boolean) {
-    if (all) {
-      setSelectedMonths(new Set(moisAffiches.map((m) => m.date_key)));
-    } else {
-      setSelectedMonths(new Set());
-    }
-  }
+    setTreeLots((prev) =>
+      prev.map((lot) => {
+        if (lot.lot !== target.lot) return lot;
+        const lotStats = cloneStats(lot.stats);
+        lotStats[oldStatut] = Math.max(0, (lotStats[oldStatut] || 0) - 1);
+        lotStats[newStatut] = (lotStats[newStatut] || 0) + 1;
 
-  function openExportLot(lotName: string) {
-    setExportLot({
-      lot: lotName,
-      months: new Set(moisFiltres.map((m) => m.date_key)),
-    });
-  }
+        const comptes = lot.comptes.map((c) => {
+          if (c.compte_id !== compteId) return c;
+          const compteStats = cloneStats(c.stats);
+          compteStats[oldStatut] = Math.max(0, (compteStats[oldStatut] || 0) - 1);
+          compteStats[newStatut] = (compteStats[newStatut] || 0) + 1;
+          return { ...c, stats: compteStats };
+        });
 
-  function toggleExportMonth(month: string) {
-    setExportLot((prev) => {
-      if (!prev) return prev;
-      const next = new Set(prev.months);
-      if (next.has(month)) next.delete(month);
-      else next.add(month);
-      return { ...prev, months: next };
-    });
-  }
-
-  function confirmExportLot() {
-    if (!exportLot) return;
-    const lotData = lotsData.find((l) => l.lot === exportLot.lot);
-    if (!lotData) return;
-    const months = Array.from(exportLot.months).sort();
-    const comptes = lotData.comptes
-      .map((c) => {
-        const moisDetails = months
-          .map((m) => {
-            const factures = (c.factures_par_mois.get(m) || []).filter((f) => selectedStatutsFilter.has(f.statut));
-            if (factures.length === 0) return null;
-            const detail = c.montants_detail_par_mois.get(m) || {
-              abo: 0,
-              conso: 0,
-              remises: 0,
-              achat: 0,
-            };
-            const total = detail.abo + detail.conso + detail.remises + detail.achat;
-            return {
-              mois: m,
-              abo: detail.abo,
-              conso: detail.conso,
-              remises: detail.remises,
-              achat: detail.achat,
-              total,
-              factures,
-            };
-          })
-          .filter(Boolean) as any[];
-        const hasData = moisDetails.length > 0;
-        return hasData ? { compte_num: c.compte_num, compte_nom: c.compte_nom, moisDetails } : null;
+        return { ...lot, stats: lotStats, comptes };
       })
-      .filter(Boolean) as { compte_num: string; compte_nom: string | null; moisDetails: any[] }[];
-    exportLotRecapPdf({
-      entrepriseNom: entreprise?.nom,
-      lotNom: lotData.lot,
-      moisSelectionnes: months,
-      comptes,
-      logoDataUrl: logoDataUrl || undefined,
-      logoWidthMm: logoSizeMm?.width,
-      logoHeightMm: logoSizeMm?.height,
-    });
-    setExportLot(null);
-  }
-
-  function handleCompteClick(compte: CompteData, mois?: string) {
-    setSelectedCompte({
-      compte_id: compte.compte_id,
-      compte_num: compte.compte_num,
-      compte_nom: compte.compte_nom,
-      mois: mois,
-    });
+    );
   }
 
   function getCompteMonths(compteId: number): string[] {
-    return moisAffiches
-      .map((m) => m.date_key)
-      .filter((dateKey) =>
-        lotsData.some((lot) =>
-          lot.comptes.some(
-            (c) => c.compte_id === compteId && (c.montants_par_mois.get(dateKey) || 0) > 0
-          )
-        )
-      );
+    const months = Array.from(compteMonthsMap.get(compteId) || []);
+    const order = new Map<string, number>(moisData.map((m, idx) => [m.date_key, idx]));
+    return months.sort((a, b) => {
+      const ai = order.has(a) ? order.get(a)! : Number.MAX_SAFE_INTEGER;
+      const bi = order.has(b) ? order.get(b)! : Number.MAX_SAFE_INTEGER;
+      if (ai !== bi) return ai - bi;
+      return a.localeCompare(b);
+    });
   }
 
   async function deleteCompteMonth(compteId: number, moisKey: string) {
@@ -441,20 +348,19 @@ export default function EntreprisePage({
     }
     setIsDeleting(true);
     try {
-      // bornes de mois
       const [year, month] = moisKey.split("-");
       const start = `${year}-${month}-01`;
       const nextMonth = month === "12" ? "01" : String(Number(month) + 1).padStart(2, "0");
       const nextYear = month === "12" ? String(Number(year) + 1) : year;
       const endExclusive = `${nextYear}-${nextMonth}-01`;
 
-      const factures = await fetchFactures({
+      const facturesToDelete = await fetchFactures({
         compte_id: compteId,
         date_debut: start,
         date_fin: endExclusive,
       });
 
-      await Promise.all(factures.map((f: Facture) => deleteFacture(f.id)));
+      await Promise.all(facturesToDelete.map((f) => deleteFacture(f.id)));
       await loadData();
       setSelectedCompte(null);
     } catch (err) {
@@ -475,8 +381,8 @@ export default function EntreprisePage({
     }
     setIsDeleting(true);
     try {
-      const factures = await fetchFactures({ compte_id: compteId });
-      await Promise.all(factures.map((f: Facture) => deleteFacture(f.id)));
+      const facturesToDelete = await fetchFactures({ compte_id: compteId });
+      await Promise.all(facturesToDelete.map((f) => deleteFacture(f.id)));
       await loadData();
       setSelectedCompte(null);
       setEditCompte(null);
@@ -487,24 +393,27 @@ export default function EntreprisePage({
     }
   }
 
-  function openEditCompte(compte: CompteData) {
+  function openEditCompteFromNode(compte: TreeCompte, lot: string) {
     setEditCompte({
-      compte,
-      nom: compte.compte_nom || "",
-      lot: compte.lot || "",
+      compte_id: compte.compte_id,
+      compte_num: compte.compte_num,
+      compte_nom: compte.compte_nom,
+      lot,
+      nomValue: compte.compte_nom || "",
+      lotValue: lot,
     });
   }
 
   async function handleSaveEdit() {
     if (!editCompte) return;
-    const trimmedNom = editCompte.nom.trim();
-    const trimmedLot = editCompte.lot.trim();
     const payload: { nom?: string | null; lot?: string | null } = {};
+    const trimmedNom = editCompte.nomValue.trim();
+    const trimmedLot = editCompte.lotValue.trim();
 
-    if (trimmedNom !== (editCompte.compte.compte_nom || "")) {
+    if (trimmedNom !== (editCompte.compte_nom || "")) {
       payload.nom = trimmedNom === "" ? null : trimmedNom;
     }
-    if (trimmedLot !== (editCompte.compte.lot || "")) {
+    if (trimmedLot !== (editCompte.lot || "")) {
       payload.lot = trimmedLot === "" ? null : trimmedLot;
     }
 
@@ -514,7 +423,7 @@ export default function EntreprisePage({
     }
 
     try {
-      await updateCompte(editCompte.compte.compte_id, payload);
+      await updateCompte(editCompte.compte_id, payload);
       await loadData();
       setEditCompte(null);
     } catch (err) {
@@ -522,47 +431,67 @@ export default function EntreprisePage({
     }
   }
 
-  function getStatutIcon(statut: number): string {
-    switch (statut) {
-      case 1:
-        return "✓";
-      case 2:
-        return "!";
-      case 0:
-      default:
-        return "○";
+  const filteredFactures = useMemo(() => {
+    const matchesNode = (f: FactureItem) => {
+      if (selectedNode.type === "entreprise") return true;
+      if (selectedNode.type === "lot") return f.lot === selectedNode.lot;
+      return f.compte_id === selectedNode.compte_id;
+    };
+    return factures
+      .filter((f) => selectedStatutsFilter.has(f.statut) && matchesNode(f))
+      .sort((a, b) => {
+        const dateComp = b.date_key.localeCompare(a.date_key);
+        if (dateComp !== 0) return dateComp;
+        const statutWeight: Record<number, number> = { 1: 0, 2: 1, 0: 2 };
+        const statutComp = (statutWeight[a.statut] || 3) - (statutWeight[b.statut] || 3);
+        if (statutComp !== 0) return statutComp;
+        const lotComp = a.lot.localeCompare(b.lot);
+        if (lotComp !== 0) return lotComp;
+        const compteComp = a.compte_num.localeCompare(b.compte_num);
+        if (compteComp !== 0) return compteComp;
+        return a.facture_num.localeCompare(b.facture_num);
+      });
+  }, [factures, selectedNode, selectedStatutsFilter]);
+
+  const timelineByMonth = useMemo(() => {
+    const grouped = new Map<string, FactureItem[]>();
+    filteredFactures.forEach((f) => {
+      if (!grouped.has(f.date_key)) grouped.set(f.date_key, []);
+      grouped.get(f.date_key)!.push(f);
+    });
+    const monthKeys = Array.from(grouped.keys()).sort((a, b) => b.localeCompare(a));
+    return monthKeys.map((key) => ({
+      date_key: key,
+      mois: formatMois(key),
+      factures: grouped.get(key)!,
+      stats: grouped.get(key)!.reduce(
+        (acc, f) => {
+          acc[f.statut] = (acc[f.statut] || 0) + 1;
+          return acc;
+        },
+        { 0: 0, 1: 0, 2: 0 } as Record<number, number>
+      ),
+    }));
+  }, [filteredFactures]);
+
+  const statusFilterChips = [
+    { statut: 1, label: "Valide", color: "#10b981" },
+    { statut: 2, label: "Conteste", color: "#f59e0b" },
+    { statut: 0, label: "Importe", color: "#9ca3af" },
+  ];
+
+  function handleStatusChipClick(statut: number, e: React.MouseEvent<HTMLButtonElement>) {
+    if (e.detail === 2) {
+      setSelectedStatutsFilter(new Set([statut]));
+      return;
     }
+    setSelectedStatutsFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(statut)) next.delete(statut);
+      else next.add(statut);
+      return next;
+    });
   }
-
-  function getStatutColor(statut: number): string {
-    switch (statut) {
-      case 1:
-        return "#10b981"; // Vert
-      case 2:
-        return "#f59e0b"; // Orange
-      case 0:
-      default:
-        return "#9ca3af"; // Gris
-    }
-  }
-
-  function formatStatutPercentage(stats: Record<number, number>): string {
-    const total = (stats[0] || 0) + (stats[1] || 0) + (stats[2] || 0);
-    if (total === 0) return "";
-
-    const parts: string[] = [];
-    if (stats[1]) {
-      parts.push(`${Math.round((stats[1] / total) * 100)}% valide`);
-    }
-    if (stats[2]) {
-      parts.push(`${Math.round((stats[2] / total) * 100)}% conteste`);
-    }
-    if (stats[0]) {
-      parts.push(`${Math.round((stats[0] / total) * 100)}% importe`);
-    }
-    return parts.join(" | ");
-  }
-
 
   if (isLoading) {
     return (
@@ -583,13 +512,12 @@ export default function EntreprisePage({
     );
   }
 
-  if (!entreprise || moisData.length === 0) {
+  if (!entreprise) {
     return (
       <div className="app app--fullwidth">
         <button onClick={onBack} className="back-button">
           ← Retour
         </button>
-        <h1>{entreprise?.nom}</h1>
         <div className="card">
           <p>Aucune donnee de facturation</p>
         </div>
@@ -604,433 +532,492 @@ export default function EntreprisePage({
       </button>
       <h1>{entreprise.nom}</h1>
 
-      <section className="card">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
-          <h2 style={{ margin: 0 }}>Vue detaillee des factures par lot</h2>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-            <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Tri des mois</span>
-            <button
-              onClick={() => setMoisOrder((prev) => (prev === "asc" ? "desc" : "asc"))}
-              className="secondary-button"
-              style={{ padding: "0.4rem 0.75rem", fontWeight: 600 }}
-            >
-              {moisOrder === "asc" ? "Ancien → Recent" : "Recent → Ancien"}
-            </button>
-          </div>
-        </div>
-
-        <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap", margin: "0.5rem 0 0.75rem" }}>
-          <div style={{ position: "relative" }}>
-            <button
-              className="secondary-button"
-              style={{ padding: "0.45rem 0.85rem", fontWeight: 600 }}
-              onClick={() => {
-                setShowMonthsDropdown((prev) => !prev);
-                setShowStatutsDropdown(false);
-              }}
-            >
-              Mois affiches ({moisFiltres.length}/{moisAffiches.length})
-            </button>
-            {showMonthsDropdown && (
-              <div
-                style={{
-                  position: "absolute",
-                  top: "calc(100% + 0.35rem)",
-                  left: 0,
-                  background: "#fff",
-                  border: "1px solid #e5e7eb",
-                  boxShadow: "0 12px 30px rgba(0,0,0,0.12)",
-                  borderRadius: "0.65rem",
-                  padding: "0.75rem",
-                  minWidth: "260px",
-                  zIndex: 50,
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
-                  <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Mois affiches</span>
-                  <div style={{ display: "flex", gap: "0.35rem" }}>
-                    <button className="secondary-button" style={{ padding: "0.25rem 0.55rem", fontWeight: 600 }} onClick={() => setAllMonthsVisible(true)}>
-                      Tout
-                    </button>
-                    <button className="secondary-button" style={{ padding: "0.25rem 0.55rem", fontWeight: 600 }} onClick={() => setAllMonthsVisible(false)}>
-                      Aucun
-                    </button>
-                  </div>
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem", maxHeight: "260px", overflow: "auto", paddingRight: "0.2rem" }}>
-                  {moisAffiches.map((m) => {
-                    const checked = selectedMonths.has(m.date_key);
-                    return (
-                      <label
-                        key={`mois-filter-${m.date_key}`}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "0.45rem",
-                          background: checked ? "#eef2ff" : "#f8fafc",
-                          border: checked ? "1px solid #c7d2fe" : "1px solid #e5e7eb",
-                          borderRadius: "0.55rem",
-                          padding: "0.35rem 0.55rem",
-                          cursor: "pointer",
-                        }}
-                      >
-                        <input type="checkbox" checked={checked} onChange={() => toggleMonthVisible(m.date_key)} style={{ margin: 0 }} />
-                        <span style={{ fontSize: "0.9rem", color: "#374151" }}>{m.mois}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div style={{ position: "relative" }}>
-            <button
-              className="secondary-button"
-              style={{ padding: "0.45rem 0.85rem", fontWeight: 600 }}
-              onClick={() => {
-                setShowStatutsDropdown((prev) => !prev);
-                setShowMonthsDropdown(false);
-              }}
-            >
-              Statuts affiches ({selectedStatutsFilter.size})
-            </button>
-            {showStatutsDropdown && (
-              <div
-                style={{
-                  position: "absolute",
-                  top: "calc(100% + 0.35rem)",
-                  left: 0,
-                  background: "#fff",
-                  border: "1px solid #e5e7eb",
-                  boxShadow: "0 12px 30px rgba(0,0,0,0.12)",
-                  borderRadius: "0.65rem",
-                  padding: "0.75rem",
-                  minWidth: "230px",
-                  zIndex: 50,
-                }}
-              >
-                <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Statuts affiches</span>
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem", marginTop: "0.45rem" }}>
-                  {[{ value: 1, label: "Valide" }, { value: 2, label: "Conteste" }, { value: 0, label: "Importe" }].map((opt) => {
-                    const checked = selectedStatutsFilter.has(opt.value);
-                    return (
-                      <label
-                        key={`statut-filter-${opt.value}`}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "0.45rem",
-                          background: checked ? "#ecfeff" : "#f8fafc",
-                          border: checked ? "1px solid #67e8f9" : "1px solid #e5e7eb",
-                          borderRadius: "0.55rem",
-                          padding: "0.35rem 0.55rem",
-                          cursor: "pointer",
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() =>
-                            setSelectedStatutsFilter((prev) => {
-                              const next = new Set(prev);
-                              if (next.has(opt.value)) next.delete(opt.value);
-                              else next.add(opt.value);
-                              if (next.size === 0) {
-                                // eviter de filtrer tout (forcer au moins un)
-                                return new Set([opt.value]);
-                              }
-                              return next;
-                            })
-                          }
-                          style={{ margin: 0 }}
-                        />
-                        <span style={{ fontSize: "0.9rem", color: "#374151" }}>{opt.label}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
+      <section
+        className="card"
+        style={{
+          padding: 0,
+          overflow: "hidden",
+        }}
+      >
         <div
           style={{
-            overflow: "auto",
-            maxHeight: tableMaxHeight,
-            border: "1px solid #e5e7eb",
-            borderRadius: "0.5rem",
+            display: "grid",
+            gridTemplateColumns: "minmax(260px, 320px) 1fr",
+            gap: "1px",
+            background: "#e5e7eb",
           }}
         >
-          {moisFiltres.length === 0 && (
-            <div style={{ padding: "1rem", color: "#9ca3af", textAlign: "center" }}>
-              Aucun mois selectionne. Selectionnez au moins un mois pour afficher le tableau.
-            </div>
-          )}
-          <table
+          <aside
             style={{
-              width: "100%",
-              borderCollapse: "collapse",
-              fontSize: tableFontSize,
-              tableLayout: "auto",
+              background: "#f9fafb",
+              padding: "1.25rem",
+              minHeight: "60vh",
             }}
           >
-            <thead
+            <div style={{ marginBottom: "1rem" }}>
+              <div style={{ fontSize: "0.9rem", color: "#6b7280" }}>Navigation</div>
+              <h3 style={{ margin: "0.15rem 0 0.35rem", fontSize: "1.1rem" }}>
+                {entreprise.nom}
+              </h3>
+              <div style={{ marginBottom: "0.65rem", color: "#374151", fontWeight: 600 }}>
+                {formatStatutPercentage(globalStats)}
+              </div>
+              <StatusBar stats={globalStats} height={10} />
+            </div>
+
+            <div
               style={{
-                position: "sticky",
-                top: 0,
-                background: "#f9fafb",
-                zIndex: 10,
+                borderTop: "1px solid #e5e7eb",
+                paddingTop: "1rem",
+                display: "flex",
+                flexDirection: "column",
+                gap: "0.6rem",
               }}
             >
-              <tr>
-                <th
+              <button
+                onClick={() => setSelectedNode({ type: "entreprise" })}
+                style={{
+                  textAlign: "left",
+                  border: "1px solid #e5e7eb",
+                  background: selectedNode.type === "entreprise" ? "#eef2ff" : "white",
+                  padding: "0.65rem 0.75rem",
+                  borderRadius: "0.6rem",
+                  cursor: "pointer",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontWeight: 700 }}>Toutes les factures</span>
+                  <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>{factures.length}</span>
+                </div>
+                <div style={{ marginTop: "0.35rem" }}>
+                  <StatusBar stats={globalStats} height={8} />
+                </div>
+              </button>
+
+              {treeLots.map((lot) => {
+                const lotCollapsed = collapsedLots.has(lot.lot);
+                return (
+                <div
+                  key={lot.lot}
                   style={{
-                    position: "sticky",
-                    left: 0,
-                    background: "#f9fafb",
-                    padding: "0.75rem",
-                    textAlign: "left",
-                    borderBottom: "2px solid #e5e7eb",
-                    borderRight: "1px solid #e5e7eb",
-                    fontWeight: "600",
-                    minWidth: stickyColWidth,
-                    zIndex: 11,
-                  }}
+                    border: "1px solid #e5e7eb",
+                    borderRadius: "0.65rem",
+                    background:
+                      selectedNode.type === "lot" && selectedNode.lot === lot.lot ? "#eef2ff" : "white",
+                    padding: "0.65rem 0.75rem",
+                    cursor: "pointer",
+                    }}
+                  onClick={() => toggleLotCollapse(lot.lot)}
                 >
-                  Lot / Compte
-                </th>
-                {moisFiltres.map((mois) => (
-                  <th
-                    key={mois.date_key}
+                  <div
                     style={{
-                      padding: cellPadding,
-                      textAlign: "right",
-                      borderBottom: "2px solid #e5e7eb",
-                      fontWeight: "600",
-                      whiteSpace: "nowrap",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
                     }}
                   >
-                     {mois.mois}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {lotsData.map((lot, lotIdx) => {
-                // Filtrer les comptes selon les statuts selectionnes et les mois visibles
-                const comptesFiltres = lot.comptes.filter((compte) => {
-                  return moisFiltres.some((mois) => {
-                    const factures = compte.factures_par_mois.get(mois.date_key) || [];
-                    return factures.some((f) => selectedStatutsFilter.has(f.statut));
-                  });
-                });
-                if (comptesFiltres.length === 0) {
-                  return null;
-                }
-                return (
-                  <React.Fragment key={`lot-frag-${lot.lot}`}>
-                    {/* Ligne du lot */}
-                    <tr
-                      key={`lot-${lot.lot}`}
-                      onClick={() => toggleLot(lot.lot)}
-                      style={{
-                        cursor: "pointer",
-                        background: lotIdx % 2 === 0 ? "#fafafa" : "#f5f5f5",
+                    <button
+                      onClick={() => {
+                        setSelectedNode({ type: "lot", lot: lot.lot });
                       }}
-                      className="hover-row"
+                      style={{
+                        background: "transparent",
+                        border: "none",
+                        padding: 0,
+                        textAlign: "left",
+                        cursor: "pointer",
+                        color: "#111827",
+                        flex: 1,
+                      }}
                     >
-                      <td
-                        style={{
-                          position: "sticky",
-                          left: 0,
-                          background: lotIdx % 2 === 0 ? "#fafafa" : "#f5f5f5",
-                          padding: "0.75rem",
-                          fontWeight: "700",
-                          borderRight: "1px solid #e5e7eb",
-                          borderBottom: "1px solid #e5e7eb",
-                        }}
-                      >
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-                          <span style={{ marginRight: "0.25rem" }}>
-                            {lot.expanded ? "▼" : "▶"}
-                          </span>
-                          <span>
-                            {lot.lot}
-                            <span style={{ marginLeft: "0.5rem", color: "#6b7280", fontWeight: "400" }}>
-                              ({lot.comptes.length} compte{lot.comptes.length > 1 ? "s" : ""})
-                            </span>
-                          </span>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openExportLot(lot.lot);
-                            }}
-                            style={{
-                              padding: isWideTable ? "0.35rem 0.6rem" : "0.25rem 0.5rem",
-                              background: "#f3e8ff",
-                              color: "#6b21a8",
-                              border: "1px solid #e9d5ff",
-                              borderRadius: "0.35rem",
-                              fontSize: isWideTable ? "0.9rem" : "0.8rem",
-                              cursor: "pointer",
-                            }}
-                          >
-                            Export PDF
-                          </button>
-                        </div>
-                      </td>
-                      {moisFiltres.map((mois) => {
-                        const filteredFactures = lot.comptes
-                          .map((c) => c.factures_par_mois.get(mois.date_key) || [])
-                          .flat()
-                          .filter((f) => selectedStatutsFilter.has(f.statut));
-                        const hasFiltered = filteredFactures.length > 0;
-                        const total = hasFiltered
-                          ? lot.comptes.reduce((acc, c) => {
-                              const factures = c.factures_par_mois.get(mois.date_key) || [];
-                              const keep = factures.some((f) => selectedStatutsFilter.has(f.statut));
-                              return acc + (keep ? c.montants_par_mois.get(mois.date_key) || 0 : 0);
-                            }, 0)
-                          : 0;
-                        const statutStats = lot.statuts_par_mois.get(mois.date_key);
+                      <div style={{ fontWeight: 700, color: "#111827" }}>{lot.lot || "Lot inconnu"}</div>
+                      <div style={{ color: "#4b5563", fontSize: "0.9rem" }}>
+                        {formatStatutPercentage(lot.stats)}
+                      </div>
+                    </button>
+                    <span style={{ color: "#4b5563", fontSize: "0.9rem", marginRight: "0.5rem" }}>
+                      {lot.stats[0] + lot.stats[1] + lot.stats[2]}
+                    </span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleLotCollapse(lot.lot);
+                      }}
+                      style={{
+                        border: "1px solid #d1d5db",
+                        background: "white",
+                        color: "#111827",
+                        borderRadius: "0.4rem",
+                        padding: "0.2rem 0.45rem",
+                        cursor: "pointer",
+                        fontWeight: 700,
+                        minWidth: "2.4rem",
+                      }}
+                      aria-label={lotCollapsed ? "Déplier le lot" : "Réduire le lot"}
+                    >
+                      {lotCollapsed ? "▼" : "▲"}
+                    </button>
+                  </div>
 
-                        return (
-                          <td
-                            key={mois.date_key}
+                  <div style={{ marginTop: "0.4rem", marginBottom: "0.35rem" }}>
+                    <StatusBar stats={lot.stats} height={7} />
+                  </div>
+
+                  {!lotCollapsed && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+                      {lot.comptes.map((compte) => {
+                        const active =
+                          selectedNode.type === "compte" && selectedNode.compte_id === compte.compte_id;
+                      return (
+                        <div
+                          key={compte.compte_id}
+                          style={{
+                            padding: "0.45rem 0.55rem",
+                              borderRadius: "0.55rem",
+                              background: active ? "#eef2ff" : "#f9fafb",
+                              border: active ? "1px solid #c7d2fe" : "1px solid #e5e7eb",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "0.25rem",
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div
                             style={{
-                              padding: cellPadding,
-                              textAlign: "right",
-                              fontWeight: "600",
-                              borderBottom: "1px solid #e5e7eb",
-                            }}
-                          >
-                            {hasFiltered && total > 0 ? (
-                              <div>
-                                <div>{total.toFixed(2)} €</div>
-                                {statutStats && (
-                                  <div style={{ marginTop: "0.25rem" }}>
-                                    <StatusBar stats={statutStats} height={8} />
-                                  </div>
-                                )}
-                              </div>
-                            ) : (
-                              "-"
-                            )}
-                          </td>
+                              display: "flex",
+                              justifyContent: "space-between",
+                                alignItems: "center",
+                                gap: "0.5rem",
+                              }}
+                            >
+                            <button
+                              onClick={() =>
+                                setSelectedNode({ type: "compte", lot: lot.lot, compte_id: compte.compte_id })
+                              }
+                              style={{
+                                  background: "transparent",
+                                  border: "none",
+                                  padding: 0,
+                                  cursor: "pointer",
+                                  textAlign: "left",
+                                  flex: 1,
+                                  color: "#111827",
+                                }}
+                              >
+                                <div style={{ fontWeight: 700 }}>
+                                  {compte.compte_nom || compte.compte_num}
+                                </div>
+                                <div style={{ color: "#4b5563", fontSize: "0.85rem" }}>
+                                  {compte.compte_num}
+                                </div>
+                              </button>
+                              <button
+                                onClick={() => openEditCompteFromNode(compte, lot.lot)}
+                                style={{
+                                  border: "1px solid #e5e7eb",
+                                  background: "white",
+                                  borderRadius: "0.4rem",
+                                  padding: "0.15rem 0.35rem",
+                                  cursor: "pointer",
+                                  color: "#111827",
+                                  fontWeight: 600,
+                                }}
+                              >
+                                Editer
+                              </button>
+                            </div>
+                            <StatusBar stats={compte.stats} height={6} />
+                          </div>
                         );
                       })}
-                    </tr>
+                    </div>
+                  )}
+                </div>
+              );
+              })}
+            </div>
+          </aside>
 
-                    {/* Lignes des comptes (si expanded) */}
-                    {lot.expanded &&
-                      comptesFiltres.map((compte, compteIdx) => (
-                        <tr
-                          key={`compte-${compte.compte_id}`}
-                          style={{
-                            background: "white",
-                          }}
-                        >
-                          <td
-                            onClick={() => openEditCompte(compte)}
-                            title="Cliquer pour editer le nom ou le lot"
+          <main
+            style={{
+              background: "white",
+              padding: "1.25rem 1.5rem",
+              minHeight: "60vh",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                flexWrap: "wrap",
+                justifyContent: "space-between",
+              }}
+            >
+              <div>
+                <div style={{ fontSize: "0.9rem", color: "#6b7280" }}>Fil chronologique</div>
+                <div style={{ fontWeight: 700 }}>
+                  {filteredFactures.length} facture(s) affichee(s)
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+                {statusFilterChips.map((chip) => {
+                  const active = selectedStatutsFilter.has(chip.statut);
+                  return (
+                    <button
+                      key={chip.statut}
+                      onClick={(e) => handleStatusChipClick(chip.statut, e)}
+                      style={{
+                        border: active ? `2px solid ${chip.color}` : "1px solid #d1d5db",
+                        background: active ? "#f8fafc" : "white",
+                        color: chip.color,
+                        borderRadius: "999px",
+                        padding: "0.4rem 0.75rem",
+                        cursor: "pointer",
+                        fontWeight: 700,
+                        fontSize: "0.9rem",
+                      }}
+                    >
+                      {chip.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ marginTop: "1.25rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
+              {timelineByMonth.length === 0 && (
+                <div
+                  style={{
+                    padding: "1.25rem",
+                    border: "1px dashed #d1d5db",
+                    borderRadius: "0.75rem",
+                    background: "#f9fafb",
+                    color: "#6b7280",
+                  }}
+                >
+                  Aucune facture a afficher avec les filtres actuels.
+                </div>
+              )}
+
+              {timelineByMonth.map((month) => {
+                const monthCollapsed = collapsedMonths.has(month.date_key);
+                return (
+                <section
+                  key={month.date_key}
+                  style={{
+                    border: "1px solid #e5e7eb",
+                    borderRadius: "0.85rem",
+                    padding: "0.85rem 1rem",
+                    background: "#f8fafc",
+                  }}
+                >
+                  <div
+                    onClick={() => toggleMonthCollapse(month.date_key)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.6rem",
+                      marginBottom: "0.75rem",
+                      justifyContent: "space-between",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                      <div
+                        style={{
+                          width: "10px",
+                          height: "10px",
+                          borderRadius: "999px",
+                          background: "#3b82f6",
+                        }}
+                      />
+                      <div style={{ fontWeight: 800, fontSize: "1rem", color: "#111827" }}>
+                        {month.mois} ({month.date_key})
+                      </div>
+                      <div style={{ color: "#4b5563", fontSize: "0.9rem" }}>
+                        {month.factures.length} facture(s)
+                      </div>
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleMonthCollapse(month.date_key);
+                      }}
+                      style={{
+                        border: "1px solid #d1d5db",
+                        background: "white",
+                        color: "#111827",
+                        borderRadius: "0.4rem",
+                        padding: "0.25rem 0.55rem",
+                        cursor: "pointer",
+                        fontWeight: 700,
+                        minWidth: "2.6rem",
+                      }}
+                      aria-label={monthCollapsed ? "Déplier le mois" : "Réduire le mois"}
+                    >
+                      {monthCollapsed ? "▼" : "▲"}
+                    </button>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.75rem",
+                      flexWrap: "wrap",
+                      marginBottom: "0.35rem",
+                    }}
+                  >
+                    <StatusBar stats={month.stats} height={8} />
+                    <div style={{ color: "#111827", fontSize: "0.9rem", fontWeight: 600 }}>
+                      Valide: {month.stats[1] || 0} · Conteste: {month.stats[2] || 0} · Importe:{" "}
+                      {month.stats[0] || 0}
+                    </div>
+                  </div>
+
+                  {!monthCollapsed && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.65rem" }}>
+                      {month.factures.map((f) => {
+                        const meta = statutMeta(f.statut);
+                        return (
+                          <div
+                            key={`${f.facture_id}-${f.compte_id}`}
+                            onClick={() => handleFactureClick(f)}
                             style={{
-                              position: "sticky",
-                              left: 0,
                               background: "white",
-                              padding: `${cellPadding} ${cellPadding} ${cellPadding} ${isWideTable ? "2.5rem" : "1.75rem"}`,
-                              borderRight: "1px solid #e5e7eb",
-                              borderBottom: compteIdx === comptesFiltres.length - 1 ? "2px solid #e5e7eb" : "1px solid #e5e7eb",
+                              border: "1px solid #e5e7eb",
+                              borderRadius: "0.75rem",
+                              padding: "0.85rem 1rem",
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: "0.65rem",
+                              boxShadow: "0 4px 12px rgba(0,0,0,0.04)",
                               cursor: "pointer",
                             }}
                           >
-                            <div style={{ fontWeight: "500" }}>
-                              {compte.compte_nom || compte.compte_num}
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                alignItems: "center",
+                                gap: "0.75rem",
+                                flexWrap: "wrap",
+                              }}
+                            >
+                              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                <span
+                                  style={{
+                                    padding: "0.2rem 0.65rem",
+                                    borderRadius: "999px",
+                                    background: meta.bg,
+                                    color: meta.color,
+                                    fontWeight: 700,
+                                    border: `1px solid ${meta.color}`,
+                                    fontSize: "0.9rem",
+                                  }}
+                                >
+                                  {meta.label}
+                                </span>
+                                <div style={{ fontWeight: 800, fontSize: "1rem", color: "#111827" }}>
+                                  Facture {f.facture_num}
+                                </div>
+                              </div>
+                              <div style={{ color: "#4b5563", fontSize: "0.9rem" }}>
+                                {decodeFactureStatus(f.statut)}
+                              </div>
                             </div>
-                            <div style={{ fontSize: "0.75rem", color: "#9ca3af" }}>
-                              {compte.compte_num}
-                            </div>
-                          </td>
-                          {moisFiltres.map((mois) => {
-                            const factures = compte.factures_par_mois.get(mois.date_key) || [];
-                            const facturesFiltered = factures.filter((f) => selectedStatutsFilter.has(f.statut));
-                            const hasFiltered = facturesFiltered.length > 0;
-                            const total = hasFiltered ? compte.montants_par_mois.get(mois.date_key) || 0 : 0;
 
-                            return (
-                              <td
-                                key={`${compte.compte_id}-${mois.date_key}`}
+                            <div
+                              style={{
+                                display: "grid",
+                                gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+                                gap: "0.5rem",
+                                alignItems: "start",
+                              }}
+                            >
+                              <div>
+                                <div style={{ color: "#4b5563", fontSize: "0.85rem" }}>Lot</div>
+                                <div style={{ fontWeight: 700, color: "#111827" }}>{f.lot || "Non renseigne"}</div>
+                              </div>
+                              <div>
+                                <div style={{ color: "#4b5563", fontSize: "0.85rem" }}>Compte</div>
+                                <div style={{ fontWeight: 700, color: "#111827" }}>
+                                  {f.compte_nom || f.compte_num}
+                                </div>
+                                <div style={{ color: "#4b5563", fontSize: "0.85rem" }}>
+                                  {f.compte_num}
+                                </div>
+                              </div>
+                              <div>
+                                <div style={{ color: "#4b5563", fontSize: "0.85rem" }}>Montant HT</div>
+                                <div style={{ fontWeight: 800, fontSize: "1.05rem", color: "#111827" }}>
+                                  {f.total.toFixed(2)} €
+                                </div>
+                              </div>
+                              <div
+                                style={{
+                                  display: "grid",
+                                  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                                  gap: "0.3rem",
+                                }}
+                              >
+                                <div style={{ color: "#4b5563", fontSize: "0.85rem" }}>Abo</div>
+                                <div style={{ textAlign: "right", fontWeight: 700, color: "#111827" }}>
+                                  {f.abo.toFixed(2)} €
+                                </div>
+                                <div style={{ color: "#4b5563", fontSize: "0.85rem" }}>Conso</div>
+                                <div style={{ textAlign: "right", fontWeight: 700, color: "#111827" }}>
+                                  {f.conso.toFixed(2)} €
+                                </div>
+                                <div style={{ color: "#4b5563", fontSize: "0.85rem" }}>Remises</div>
+                                <div style={{ textAlign: "right", fontWeight: 700, color: "#111827" }}>
+                                  {f.remises.toFixed(2)} €
+                                </div>
+                                <div style={{ color: "#4b5563", fontSize: "0.85rem" }}>Achat</div>
+                                <div style={{ textAlign: "right", fontWeight: 700, color: "#111827" }}>
+                                  {f.achat.toFixed(2)} €
+                                </div>
+                              </div>
+                            </div>
+
+                            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                              <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  if (hasFiltered && total > 0) {
-                                    handleCompteClick(compte, mois.date_key);
-                                  }
+                                  openEditCompteFromNode(
+                                    {
+                                      compte_id: f.compte_id,
+                                      compte_num: f.compte_num,
+                                      compte_nom: f.compte_nom,
+                                      stats: cloneStats(),
+                                    },
+                                    f.lot
+                                  );
                                 }}
                                 style={{
-                                  padding: cellPadding,
-                                  textAlign: "right",
-                                  borderBottom: compteIdx === comptesFiltres.length - 1 ? "2px solid #e5e7eb" : "1px solid #e5e7eb",
-                                  cursor: hasFiltered && total > 0 ? "pointer" : "default",
+                                  padding: "0.5rem 0.9rem",
+                                  borderRadius: "0.5rem",
+                                  border: "1px solid #e5e7eb",
+                                  background: "#f9fafb",
+                                  cursor: "pointer",
+                                  fontWeight: 600,
+                                  color: "#111827",
                                 }}
-                                className={hasFiltered && total > 0 ? "hover-row" : ""}
                               >
-                                {hasFiltered && total > 0 ? (
-                                  <div>
-                                    <div style={{ fontWeight: "600", fontSize: "0.95rem" }}>
-                                      {total.toFixed(2)} €
-                                    </div>
-                                    <div style={{ marginTop: "0.35rem", display: "flex", flexDirection: "column", gap: "0.15rem" }}>
-                                      {facturesFiltered.map((f, idx) => (
-                                        <div
-                                          key={`${compte.compte_id}-${mois.date_key}-${idx}`}
-                                          style={{
-                                            display: "flex",
-                                            alignItems: "center",
-                                            justifyContent: "flex-end",
-                                            fontSize: "0.85rem",
-                                          }}
-                                        >
-                                          <span
-                                            style={{
-                                              color: getStatutColor(f.statut),
-                                              marginRight: "0.35rem",
-                                              fontWeight: "600",
-                                            }}
-                                            title={`Facture ${f.num} - ${decodeFactureStatus(f.statut)}`}
-                                          >
-                                            {getStatutIcon(f.statut)}
-                                          </span>
-                                          <span style={{ color: "#374151", fontWeight: "500" }}>
-                                            {f.num}
-                                          </span>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  "-"
-                                )}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
-                  </React.Fragment>
-                );
+                                Editer le compte
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              );
               })}
-            </tbody>
-          </table>
+            </div>
+          </main>
         </div>
-
-        <p style={{ marginTop: "1rem", color: "#6b7280", fontSize: "0.875rem" }}>
-          💡 Cliquez sur un lot pour voir/masquer ses comptes • Cliquez sur une case (mois) pour voir le detail de ce mois
-        </p>
-        <p style={{ marginTop: "0.5rem", color: "#6b7280", fontSize: "0.875rem" }}>
-          <span style={{ color: "#10b981" }}>✓</span> Valide •
-          <span style={{ color: "#f59e0b", marginLeft: "0.5rem" }}>!</span> Conteste •
-          <span style={{ color: "#9ca3af", marginLeft: "0.5rem" }}>○</span> Importe
-        </p>
       </section>
 
       {selectedCompte && (() => {
@@ -1069,105 +1056,6 @@ export default function EntreprisePage({
         );
       })()}
 
-      {exportLot && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.45)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1090,
-          }}
-          onClick={() => setExportLot(null)}
-        >
-          <div
-            style={{
-              background: "white",
-              borderRadius: "0.75rem",
-              width: "90%",
-              maxWidth: "520px",
-              boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ padding: "1.25rem 1.5rem", borderBottom: "1px solid #e5e7eb" }}>
-              <h3 style={{ margin: 0, fontSize: "1.15rem", fontWeight: 700 }}>
-                Exporter le lot {exportLot.lot}
-              </h3>
-              <p style={{ margin: "0.35rem 0 0", color: "#6b7280" }}>
-                Selectionnez les mois a inclure dans le PDF recapitulatif.
-              </p>
-            </div>
-            <div
-              style={{
-                maxHeight: "320px",
-                overflow: "auto",
-                padding: "1rem 1.5rem",
-                display: "grid",
-                gap: "0.35rem",
-              }}
-            >
-              {moisAffiches.map((m) => (
-                <label
-                  key={m.date_key}
-                  style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={exportLot.months.has(m.date_key)}
-                    onChange={() => toggleExportMonth(m.date_key)}
-                  />
-                  <span>
-                    {m.mois} ({m.date_key})
-                  </span>
-                </label>
-              ))}
-              {moisAffiches.length === 0 && <div style={{ color: "#6b7280" }}>Aucun mois disponible.</div>}
-            </div>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "flex-end",
-                gap: "0.5rem",
-                padding: "0.85rem 1.5rem",
-                borderTop: "1px solid #e5e7eb",
-              }}
-            >
-              <button
-                onClick={() => setExportLot(null)}
-                style={{
-                  padding: "0.55rem 1rem",
-                  border: "1px solid #d1d5db",
-                  background: "white",
-                  borderRadius: "0.4rem",
-                  cursor: "pointer",
-                  color: "#374151",
-                }}
-              >
-                Annuler
-              </button>
-              <button
-                onClick={confirmExportLot}
-                disabled={exportLot.months.size === 0}
-                style={{
-                  padding: "0.55rem 1.1rem",
-                  border: "none",
-                  background: exportLot.months.size === 0 ? "#9ca3af" : "#2563eb",
-                  color: "white",
-                  borderRadius: "0.4rem",
-                  cursor: exportLot.months.size === 0 ? "not-allowed" : "pointer",
-                  fontWeight: 600,
-                }}
-              >
-                Exporter
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {editCompte && (
         <div
           style={{
@@ -1194,7 +1082,7 @@ export default function EntreprisePage({
           >
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <h3 style={{ margin: 0, fontSize: "1.25rem" }}>
-                editer le compte {editCompte.compte.compte_num}
+                Editer le compte {editCompte.compte_num}
               </h3>
               <button
                 onClick={() => setEditCompte(null)}
@@ -1215,8 +1103,8 @@ export default function EntreprisePage({
               <label style={{ display: "flex", flexDirection: "column", gap: "0.35rem", fontWeight: 600 }}>
                 Nom du compte
                 <input
-                  value={editCompte.nom}
-                  onChange={(e) => setEditCompte({ ...editCompte, nom: e.target.value })}
+                  value={editCompte.nomValue}
+                  onChange={(e) => setEditCompte({ ...editCompte, nomValue: e.target.value })}
                   placeholder="Nom affiche (optionnel)"
                   style={{
                     padding: "0.6rem 0.75rem",
@@ -1230,10 +1118,8 @@ export default function EntreprisePage({
               <label style={{ display: "flex", flexDirection: "column", gap: "0.35rem", fontWeight: 600 }}>
                 Lot
                 {(() => {
-                  const lotOptions = Array.from(
-                    new Set(lotsData.map((l) => l.lot).filter((v): v is string => Boolean(v)))
-                  );
-                  const currentLot = editCompte.lot || "";
+                  const lotOptions = Array.from(new Set(treeLots.map((l) => l.lot).filter(Boolean)));
+                  const currentLot = editCompte.lotValue || "";
                   const isCustom = currentLot !== "" && !lotOptions.includes(currentLot);
                   return (
                     <>
@@ -1242,9 +1128,9 @@ export default function EntreprisePage({
                         onChange={(e) => {
                           const val = e.target.value;
                           if (val === "__custom__") {
-                            setEditCompte({ ...editCompte, lot: "" });
+                            setEditCompte({ ...editCompte, lotValue: "" });
                           } else {
-                            setEditCompte({ ...editCompte, lot: val });
+                            setEditCompte({ ...editCompte, lotValue: val });
                           }
                         }}
                         style={{
@@ -1265,7 +1151,7 @@ export default function EntreprisePage({
                       {(isCustom || currentLot === "") && (
                         <input
                           value={currentLot}
-                          onChange={(e) => setEditCompte({ ...editCompte, lot: e.target.value })}
+                          onChange={(e) => setEditCompte({ ...editCompte, lotValue: e.target.value })}
                           placeholder="Nouveau lot"
                           style={{
                             marginTop: "0.5rem",
@@ -1282,9 +1168,17 @@ export default function EntreprisePage({
               </label>
             </div>
 
-            <div style={{ display: "flex", justifyContent: "space-between", gap: "0.75rem", marginTop: "1.5rem", alignItems: "center" }}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: "0.75rem",
+                marginTop: "1.5rem",
+                alignItems: "center",
+              }}
+            >
               <button
-                onClick={() => deleteCompteAll(editCompte.compte.compte_id)}
+                onClick={() => deleteCompteAll(editCompte.compte_id)}
                 style={{
                   padding: "0.65rem 1rem",
                   border: "1px solid #ef4444",
