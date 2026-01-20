@@ -2,12 +2,14 @@ import React from "react";
 import { useEffect, useMemo, useState } from "react";
 import {
   getEntreprise,
-  executeQuery,
   updateCompte,
-  fetchFactures,
   deleteFacture,
+  fetchFactures,
   type Entreprise,
+  type Facture,
+  fetchEntrepriseMatrice,
 } from "../newApi";
+
 import { decodeFactureStatus } from "../utils/codecs";
 import { exportLotRecapPdf } from "../utils/pdfReport";
 import { StatusBar } from "../utils/statusBar";
@@ -82,7 +84,7 @@ export default function EntreprisePage({
   } | null>(null);
   const [exportLot, setExportLot] = useState<{ lot: string; months: Set<string> } | null>(null);
 
-  // Modal de détail
+  // Modal de detail
   const [selectedCompte, setSelectedCompte] = useState<DetailModalData | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [selectedStatutsFilter, setSelectedStatutsFilter] = useState<Set<number>>(new Set([0, 1, 2]));
@@ -93,7 +95,7 @@ export default function EntreprisePage({
   const viewportWidth = useViewportWidth();
   const isWideTable = viewportWidth >= 1400;
   const isUltraWideTable = viewportWidth >= 1800;
-  // On privilégie l'affichage du maximum de colonnes : padding compact et colonne sticky resserrée
+  // On privilegie l'affichage du maximum de colonnes : padding compact et colonne sticky resserree
   const cellPadding = isUltraWideTable ? "0.55rem" : isWideTable ? "0.5rem" : "0.45rem";
   const stickyColWidth = isUltraWideTable ? "200px" : isWideTable ? "180px" : "170px";
   const tableFontSize = isWideTable ? "0.85rem" : "0.82rem";
@@ -154,7 +156,7 @@ export default function EntreprisePage({
         };
         reader.readAsDataURL(blob);
       } catch (err) {
-        console.warn("Logo non chargé", err);
+        console.warn("Logo non charge", err);
       }
     }
     loadLogo();
@@ -165,7 +167,7 @@ export default function EntreprisePage({
 
   useEffect(() => {
     const eligibleKeys = new Set(moisEligibles.map((m) => m.date_key));
-    // Synchronise toujours la sélection sur les mois éligibles (affichés) selon le filtre statut
+    // Synchronise toujours la selection sur les mois eligibles (affiches) selon le filtre statut
     setSelectedMonths(new Set(eligibleKeys));
   }, [moisEligibles]);
 
@@ -180,122 +182,76 @@ export default function EntreprisePage({
       const entrepriseData = await getEntreprise(entrepriseId);
       setEntreprise(entrepriseData);
 
-      // Requête SQL pour récupérer les données détaillées par facture
-      const query = `
-        SELECT
-          strftime('%Y-%m', f.date) as date_key,
-          f.id as facture_id,
-          c.id as compte_id,
-          c.num as compte_num,
-          c.nom as compte_nom,
-          c.lot as lot,
-          f.num as facture_num,
-          f.statut as facture_statut,
-          f.abo as abo,
-          f.conso as conso,
-          f.remises as remises,
-          f.achat as achat,
-          (f.abo + f.conso + f.remises + f.achat) as total_ht
-        FROM factures f
-        JOIN comptes c ON f.compte_id = c.id
-        WHERE c.entreprise_id = ${entrepriseId}
-        ORDER BY c.lot, c.num, date_key
-      `;
+      const matrice = await fetchEntrepriseMatrice(entrepriseId);
 
-      const result = await executeQuery(query);
+      const moisList: MoisData[] = (matrice.months || []).map((m) => ({
+        date_key: m,
+        mois: formatMois(m),
+      }));
+      setMoisData(moisList);
+      setSelectedMonths(new Set(matrice.months || []));
 
-      // Agrège les données
-      const moisSet = new Set<string>();
-      const lotsMap = new Map<string, LotData>();
+      const lotsList: LotData[] = matrice.lots
+        .map((lot) => {
+          const lotTotals = new Map<string, number>();
+          Object.entries(lot.totals_by_month || {}).forEach(([k, v]) => lotTotals.set(k, Number(v || 0)));
 
-      result.data.forEach((row: any) => {
-        const dateKey = row.date_key;
-        const lot = row.lot || "Non défini";
-
-        moisSet.add(dateKey);
-
-        // Lot
-        if (!lotsMap.has(lot)) {
-          lotsMap.set(lot, {
-            lot: lot,
-            expanded: false,
-            total_par_mois: new Map(),
-            statuts_par_mois: new Map(),
-            comptes: [],
+          const lotStatuts = new Map<string, Record<number, number>>();
+          Object.entries(lot.statuts_by_month || {}).forEach(([k, v]) => {
+            const parsed: Record<number, number> = {};
+            Object.entries(v || {}).forEach(([st, val]) => {
+              parsed[Number(st)] = Number(val || 0);
+            });
+            lotStatuts.set(k, parsed);
           });
-        }
-        const lotData = lotsMap.get(lot)!;
 
-        // Compte
-        let compteData = lotData.comptes.find(c => c.compte_id === row.compte_id);
-        if (!compteData) {
-          compteData = {
-            compte_id: row.compte_id,
-            compte_num: row.compte_num,
-          compte_nom: row.compte_nom,
-          lot: lot,
-          montants_par_mois: new Map(),
-          factures_par_mois: new Map(),
-          montants_detail_par_mois: new Map(),
-        };
-        lotData.comptes.push(compteData);
-      }
+          const comptes: CompteData[] = lot.comptes.map((c) => {
+            const montantsParMois = new Map<string, number>();
+            const facturesParMois = new Map<string, FactureInfo[]>();
+            const montantsDetailParMois = new Map<string, { abo: number; conso: number; remises: number; achat: number }>();
 
-        // Montants
-        const currentCompteTotal = compteData.montants_par_mois.get(dateKey) || 0;
-        compteData.montants_par_mois.set(dateKey, currentCompteTotal + (Number(row.total_ht) || 0));
-        const detail = compteData.montants_detail_par_mois.get(dateKey) || {
-          abo: 0,
-          conso: 0,
-          remises: 0,
-          achat: 0,
-        };
-        detail.abo += Number(row.abo) || 0;
-        detail.conso += Number(row.conso) || 0;
-        detail.remises += Number(row.remises) || 0;
-        detail.achat += Number(row.achat) || 0;
-        compteData.montants_detail_par_mois.set(dateKey, detail);
+            (c.factures || []).forEach((f) => {
+              const dk = f.date_key;
+              const currentTotal = montantsParMois.get(dk) || 0;
+              montantsParMois.set(dk, currentTotal + (Number(f.total_ht) || 0));
 
-        // Factures pour le compte
-        if (!compteData.factures_par_mois.has(dateKey)) {
-          compteData.factures_par_mois.set(dateKey, []);
-        }
-        compteData.factures_par_mois.get(dateKey)!.push({
-          facture_id: row.facture_id,
-          num: row.facture_num,
-          statut: row.facture_statut,
-        });
+              const detail = montantsDetailParMois.get(dk) || { abo: 0, conso: 0, remises: 0, achat: 0 };
+              detail.abo += Number(f.abo || 0);
+              detail.conso += Number(f.conso || 0);
+              detail.remises += Number(f.remises || 0);
+              detail.achat += Number(f.achat || 0);
+              montantsDetailParMois.set(dk, detail);
 
-        // Agrégation au niveau lot
-        const currentLotTotal = lotData.total_par_mois.get(dateKey) || 0;
-        lotData.total_par_mois.set(dateKey, currentLotTotal + row.total_ht);
+              if (!facturesParMois.has(dk)) facturesParMois.set(dk, []);
+              facturesParMois.get(dk)!.push({
+                facture_id: f.facture_id,
+                num: f.facture_num,
+                statut: f.statut,
+              });
+            });
 
-        // Statistiques de statut pour le lot
-        if (!lotData.statuts_par_mois.has(dateKey)) {
-          lotData.statuts_par_mois.set(dateKey, { 0: 0, 1: 0, 2: 0 });
-        }
-        const statutStats = lotData.statuts_par_mois.get(dateKey)!;
-        const statut = Number(row.facture_statut);
-        if (statut === 0 || statut === 1 || statut === 2) {
-          statutStats[statut]++;
-        }
-      });
+            return {
+              compte_id: c.compte_id,
+              compte_num: c.compte_num,
+              compte_nom: c.compte_nom,
+              lot: lot.lot,
+              montants_par_mois: montantsParMois,
+              factures_par_mois: facturesParMois,
+              montants_detail_par_mois: montantsDetailParMois,
+            };
+          });
 
-      setMoisData(
-        Array.from(moisSet)
-          .sort() // Tri croissant: ancien → récent
-          .map((dateKey) => ({
-            date_key: dateKey,
-            mois: formatMois(dateKey),
-          }))
-      );
-      setSelectedMonths(new Set(Array.from(moisSet)));
+          return {
+            lot: lot.lot,
+            expanded: expandedLots.has(lot.lot),
+            total_par_mois: lotTotals,
+            statuts_par_mois: lotStatuts,
+            comptes,
+          };
+        })
+        .sort((a, b) => a.lot.localeCompare(b.lot));
 
-      setLotsData(
-        Array.from(lotsMap.values())
-          .sort((a, b) => a.lot.localeCompare(b.lot))
-          .map((lot) => ({ ...lot, expanded: expandedLots.has(lot.lot) }))
-      );
+      setLotsData(lotsList);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -303,7 +259,8 @@ export default function EntreprisePage({
     }
   }
 
-  // Mise à jour ciblée après validation d'un rapport (évite de reconstruire toute la page)
+
+  // Mise a jour ciblee apres validation d'un rapport (evite de reconstruire toute la page)
   function handleFactureStatusUpdate({
     factureId,
     newStatut,
@@ -355,9 +312,9 @@ export default function EntreprisePage({
   function formatMois(dateKey: string): string {
     const [year, month] = dateKey.split("-");
     const moisMap: { [key: string]: string } = {
-      "01": "Jan", "02": "Fév", "03": "Mar", "04": "Avr",
-      "05": "Mai", "06": "Juin", "07": "Juil", "08": "Août",
-      "09": "Sep", "10": "Oct", "11": "Nov", "12": "Déc",
+      "01": "Jan", "02": "Fev", "03": "Mar", "04": "Avr",
+      "05": "Mai", "06": "Juin", "07": "Juil", "08": "Aout",
+      "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dec",
     };
     return `${moisMap[month]} ${year}`;
   }
@@ -477,7 +434,7 @@ export default function EntreprisePage({
     if (isDeleting) return;
     if (
       !confirm(
-        `Supprimer toutes les données du compte ${compteId} pour le mois ${moisKey} ? Cette action est irréversible.`
+        `Supprimer toutes les donnees du compte ${compteId} pour le mois ${moisKey} ? Cette action est irreversible.`
       )
     ) {
       return;
@@ -492,12 +449,12 @@ export default function EntreprisePage({
       const endExclusive = `${nextYear}-${nextMonth}-01`;
 
       const factures = await fetchFactures({
-        compte_id: compteId.toString(),
+        compte_id: compteId,
         date_debut: start,
         date_fin: endExclusive,
       });
 
-      await Promise.all(factures.map((f) => deleteFacture(f.id)));
+      await Promise.all(factures.map((f: Facture) => deleteFacture(f.id)));
       await loadData();
       setSelectedCompte(null);
     } catch (err) {
@@ -511,15 +468,15 @@ export default function EntreprisePage({
     if (isDeleting) return;
     if (
       !confirm(
-        `Supprimer toutes les données du compte ${compteId} (tous les mois) ? Cette action est irréversible.`
+        `Supprimer toutes les donnees du compte ${compteId} (tous les mois) ? Cette action est irreversible.`
       )
     ) {
       return;
     }
     setIsDeleting(true);
     try {
-      const factures = await fetchFactures({ compte_id: compteId.toString() });
-      await Promise.all(factures.map((f) => deleteFacture(f.id)));
+      const factures = await fetchFactures({ compte_id: compteId });
+      await Promise.all(factures.map((f: Facture) => deleteFacture(f.id)));
       await loadData();
       setSelectedCompte(null);
       setEditCompte(null);
@@ -561,7 +518,7 @@ export default function EntreprisePage({
       await loadData();
       setEditCompte(null);
     } catch (err) {
-      alert((err as Error).message || "Erreur lors de la mise à jour du compte");
+      alert((err as Error).message || "Erreur lors de la mise a jour du compte");
     }
   }
 
@@ -634,7 +591,7 @@ export default function EntreprisePage({
         </button>
         <h1>{entreprise?.nom}</h1>
         <div className="card">
-          <p>Aucune donnée de facturation</p>
+          <p>Aucune donnee de facturation</p>
         </div>
       </div>
     );
@@ -649,7 +606,7 @@ export default function EntreprisePage({
 
       <section className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
-          <h2 style={{ margin: 0 }}>Vue détaillée des factures par lot</h2>
+          <h2 style={{ margin: 0 }}>Vue detaillee des factures par lot</h2>
           <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
             <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Tri des mois</span>
             <button
@@ -657,7 +614,7 @@ export default function EntreprisePage({
               className="secondary-button"
               style={{ padding: "0.4rem 0.75rem", fontWeight: 600 }}
             >
-              {moisOrder === "asc" ? "Ancien → Récent" : "Récent → Ancien"}
+              {moisOrder === "asc" ? "Ancien → Recent" : "Recent → Ancien"}
             </button>
           </div>
         </div>
@@ -672,7 +629,7 @@ export default function EntreprisePage({
                 setShowStatutsDropdown(false);
               }}
             >
-              Mois affichés ({moisFiltres.length}/{moisAffiches.length})
+              Mois affiches ({moisFiltres.length}/{moisAffiches.length})
             </button>
             {showMonthsDropdown && (
               <div
@@ -690,7 +647,7 @@ export default function EntreprisePage({
                 }}
               >
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
-                  <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Mois affichés</span>
+                  <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Mois affiches</span>
                   <div style={{ display: "flex", gap: "0.35rem" }}>
                     <button className="secondary-button" style={{ padding: "0.25rem 0.55rem", fontWeight: 600 }} onClick={() => setAllMonthsVisible(true)}>
                       Tout
@@ -736,7 +693,7 @@ export default function EntreprisePage({
                 setShowMonthsDropdown(false);
               }}
             >
-              Statuts affichés ({selectedStatutsFilter.size})
+              Statuts affiches ({selectedStatutsFilter.size})
             </button>
             {showStatutsDropdown && (
               <div
@@ -753,9 +710,9 @@ export default function EntreprisePage({
                   zIndex: 50,
                 }}
               >
-                <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Statuts affichés</span>
+                <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Statuts affiches</span>
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem", marginTop: "0.45rem" }}>
-                  {[{ value: 1, label: "Validé" }, { value: 2, label: "Contesté" }, { value: 0, label: "Importé" }].map((opt) => {
+                  {[{ value: 1, label: "Valide" }, { value: 2, label: "Conteste" }, { value: 0, label: "Importe" }].map((opt) => {
                     const checked = selectedStatutsFilter.has(opt.value);
                     return (
                       <label
@@ -780,7 +737,7 @@ export default function EntreprisePage({
                               if (next.has(opt.value)) next.delete(opt.value);
                               else next.add(opt.value);
                               if (next.size === 0) {
-                                // éviter de filtrer tout (forcer au moins un)
+                                // eviter de filtrer tout (forcer au moins un)
                                 return new Set([opt.value]);
                               }
                               return next;
@@ -808,7 +765,7 @@ export default function EntreprisePage({
         >
           {moisFiltres.length === 0 && (
             <div style={{ padding: "1rem", color: "#9ca3af", textAlign: "center" }}>
-              Aucun mois sélectionné. Sélectionnez au moins un mois pour afficher le tableau.
+              Aucun mois selectionne. Selectionnez au moins un mois pour afficher le tableau.
             </div>
           )}
           <table
@@ -862,7 +819,7 @@ export default function EntreprisePage({
             </thead>
             <tbody>
               {lotsData.map((lot, lotIdx) => {
-                // Filtrer les comptes selon les statuts sélectionnés et les mois visibles
+                // Filtrer les comptes selon les statuts selectionnes et les mois visibles
                 const comptesFiltres = lot.comptes.filter((compte) => {
                   return moisFiltres.some((mois) => {
                     const factures = compte.factures_par_mois.get(mois.date_key) || [];
@@ -977,7 +934,7 @@ export default function EntreprisePage({
                         >
                           <td
                             onClick={() => openEditCompte(compte)}
-                            title="Cliquer pour éditer le nom ou le lot"
+                            title="Cliquer pour editer le nom ou le lot"
                             style={{
                               position: "sticky",
                               left: 0,
@@ -1067,12 +1024,12 @@ export default function EntreprisePage({
         </div>
 
         <p style={{ marginTop: "1rem", color: "#6b7280", fontSize: "0.875rem" }}>
-          💡 Cliquez sur un lot pour voir/masquer ses comptes • Cliquez sur une case (mois) pour voir le détail de ce mois
+          💡 Cliquez sur un lot pour voir/masquer ses comptes • Cliquez sur une case (mois) pour voir le detail de ce mois
         </p>
         <p style={{ marginTop: "0.5rem", color: "#6b7280", fontSize: "0.875rem" }}>
-          <span style={{ color: "#10b981" }}>✓</span> Validé •
-          <span style={{ color: "#f59e0b", marginLeft: "0.5rem" }}>!</span> Contesté •
-          <span style={{ color: "#9ca3af", marginLeft: "0.5rem" }}>○</span> Importé
+          <span style={{ color: "#10b981" }}>✓</span> Valide •
+          <span style={{ color: "#f59e0b", marginLeft: "0.5rem" }}>!</span> Conteste •
+          <span style={{ color: "#9ca3af", marginLeft: "0.5rem" }}>○</span> Importe
         </p>
       </section>
 
@@ -1140,7 +1097,7 @@ export default function EntreprisePage({
                 Exporter le lot {exportLot.lot}
               </h3>
               <p style={{ margin: "0.35rem 0 0", color: "#6b7280" }}>
-                Sélectionnez les mois à inclure dans le PDF récapitulatif.
+                Selectionnez les mois a inclure dans le PDF recapitulatif.
               </p>
             </div>
             <div
@@ -1237,7 +1194,7 @@ export default function EntreprisePage({
           >
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <h3 style={{ margin: 0, fontSize: "1.25rem" }}>
-                Éditer le compte {editCompte.compte.compte_num}
+                editer le compte {editCompte.compte.compte_num}
               </h3>
               <button
                 onClick={() => setEditCompte(null)}
@@ -1260,7 +1217,7 @@ export default function EntreprisePage({
                 <input
                   value={editCompte.nom}
                   onChange={(e) => setEditCompte({ ...editCompte, nom: e.target.value })}
-                  placeholder="Nom affiché (optionnel)"
+                  placeholder="Nom affiche (optionnel)"
                   style={{
                     padding: "0.6rem 0.75rem",
                     borderRadius: "0.5rem",

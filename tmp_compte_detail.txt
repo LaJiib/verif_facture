@@ -9,7 +9,6 @@ import {
   listAbonnements,
   attachAbonnementToLines,
   getFactureAbonnements,
-  fetchFactures,
   fetchFactureDetailStats,
   Abonnement,
   FactureDetailStats,
@@ -469,57 +468,34 @@ export default function CompteDetailModal({
   }
 
   function computeDelta(current: number, prev?: number | null) {
-    if (prev === undefined || prev === null) return { symbol: '-', color: '#6b7280', text: 'N/A' };
-    if (prev === 0) return { symbol: current === 0 ? '-' : '^', color: current === 0 ? '#6b7280' : '#16a34a', text: 'N/A' };
+    if (prev === undefined || prev === null) return { symbol: "→", color: "#6b7280", text: "N/A" };
+    if (prev === 0) return { symbol: current === 0 ? "→" : "↑", color: current === 0 ? "#6b7280" : "#16a34a", text: "N/A" };
     const delta = ((current - prev) / prev) * 100;
-    const symbol = delta > 0 ? '^' : delta < 0 ? 'v' : '-';
-    const color = delta > 0 ? '#16a34a' : delta < 0 ? '#dc2626' : '#6b7280';
-    const text = `${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%`;
+    const symbol = delta > 0 ? "↑" : delta < 0 ? "↓" : "→";
+    const color = delta > 0 ? "#16a34a" : delta < 0 ? "#dc2626" : "#6b7280";
+    const text = `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}%`;
     return { symbol, color, text };
   }
 
-  async function loadData() {
+    async function loadData() {
     setIsLoading(true);
     try {
-      // 1) Identifier la facture cible (par mois si fourni)
-      let targetFactureId = selectedFactureId;
-      if (!targetFactureId) {
-        try {
-          if (mois) {
-            const [year, month] = mois.split("-");
-            const start = `${year}-${month}-01`;
-            const nextMonth = month === "12" ? "01" : String(Number(month) + 1).padStart(2, "0");
-            const nextYear = month === "12" ? String(Number(year) + 1) : year;
-            const endExclusive = `${nextYear}-${nextMonth}-01`;
-            const facturesListe = await fetchFactures({ compte_id: compteId, date_debut: start, date_fin: endExclusive });
-            targetFactureId = facturesListe?.[0]?.id ?? null;
-          } else {
-            const facturesListe = await fetchFactures({ compte_id: compteId });
-            targetFactureId = facturesListe?.[0]?.id ?? null;
-          }
-        } catch (inner) {
-          console.warn("Impossible de recuperer la liste des factures", inner);
-        }
-      }
-
-      if (!targetFactureId) {
-        setDetailFactures([]);
-        setDetailLignes([]);
-        setSelectedFactureId(null);
+      // Choisir l’ID de facture a charger : facture courante ou premiere disponible
+      const factureId = factureCourante?.facture_id || detailFactures[0]?.facture_id;
+      if (!factureId) {
         setIsLoading(false);
         return;
       }
 
-      const detailStats: FactureDetailStats = await fetchFactureDetailStats(targetFactureId);
+      const detailStats: FactureDetailStats = await fetchFactureDetailStats(factureId);
 
-      // 2) Stats globales
-      const stats = detailStats.stats_globales || {};
+      // Stats globales courant / precedent
       setStatsGlobales({
-        total_abo: stats.total_abo || 0,
-        total_conso: stats.total_conso || 0,
-        total_remises: stats.total_remises || 0,
-        total_achat: stats.total_achat || 0,
-        total_ht: stats.total_ht || 0,
+        total_abo: detailStats.stats_globales.total_abo || 0,
+        total_conso: detailStats.stats_globales.total_conso || 0,
+        total_remises: detailStats.stats_globales.total_remises || 0,
+        total_achat: detailStats.stats_globales.total_achat || 0,
+        total_ht: detailStats.stats_globales.total_ht || 0,
       });
       setPrevStatsGlobales(
         detailStats.stats_globales_prev
@@ -533,28 +509,14 @@ export default function CompteDetailModal({
           : null
       );
 
-      // 3) Lignes + types
-      const lignesRaw = detailStats.facture_detail.lignes || [];
-      const lignes: DetailLigne[] = lignesRaw.map((l) => ({
-        ligne_id: l.ligne_id,
-        ligne_num: l.ligne_num,
-        ligne_type: l.ligne_type,
-        ligne_statut: l.statut,
-        abo_id_ref: (l as any).abo_id_ref ?? null,
-        abo_nom_ref: (l as any).abo_nom_ref ?? null,
-        abo_prix_ref: (l as any).abo_prix_ref ?? null,
-        abo: l.abo ?? 0,
-        conso: l.conso ?? 0,
-        remises: l.remises ?? 0,
-        achat: (l as any).achat ?? 0,
-        total_ht: l.total_ht ?? 0,
-      }));
+      // Lignes et types
+      const lignes = detailStats.facture_detail.lignes || [];
       setDetailLignes(lignes);
       const typesMap: Record<number, number> = {};
       lignes.forEach((l) => (typesMap[l.ligne_id] = l.ligne_type ?? 3));
       setEditedTypes(typesMap);
 
-      // 4) Facture courante
+      // Facture courante
       const f = detailStats.facture_detail.facture;
       const factures: FactureDetail[] = [
         {
@@ -565,15 +527,14 @@ export default function CompteDetailModal({
           abo: f.abo,
           conso: f.conso,
           remises: f.remises,
-          achat: (f as any).achat ?? 0,
+          achat: f.achat,
           total_ht: f.total_ht,
           csv_id: f.csv_id || null,
         },
       ];
       setDetailFactures(factures);
-      setSelectedFactureId(f.id);
-
-      // 5) Résumé lignes (écarts)
+      setFactureCourante(factures[0]);
+      // Resume lignes pour ecarts
       const lignesAbo = lignes.reduce((acc, l) => acc + (l.abo || 0), 0);
       const lignesConso = lignes.reduce((acc, l) => acc + (l.conso || 0), 0);
       const lignesRemises = lignes.reduce((acc, l) => acc + (l.remises || 0), 0);
@@ -590,70 +551,65 @@ export default function CompteDetailModal({
           lignes_total_ht: lignesAbo + lignesConso + lignesRemises + lignesAchat,
         },
       ]);
-
-      // 6) Meta compte (reset CSV)
+      // Meta compte (pour reset CSV)
       setCompteMeta({
         entreprise_id: detailStats.facture_detail.compte.entreprise_id,
         num: detailStats.facture_detail.compte.num,
       });
 
-      // 7) Lignes précédentes (Record -> liste)
-      const prevList: DetailLigne[] = Object.entries(detailStats.lignes_by_id || {}).map(([id, v]) => ({
-        ligne_id: Number(id),
-        ligne_num: String(id),
-        ligne_type: (v as any).ligne_type ?? 3,
-        ligne_statut: (v as any).statut,
-        abo: (v as any).abo ?? 0,
-        conso: (v as any).conso ?? 0,
-        remises: (v as any).remises ?? 0,
-        achat: (v as any).achat ?? 0,
-        total_ht: (v as any).total_ht ?? 0,
-      }));
-      setPrevLignes(prevList);
-      setPrevFactures([]); // pas de données historiques dans la vue
+      // Lignes precedentes (map par ligne_id)
+      setPrevLignes(detailStats.lignes_by_id || {});
+      setPrevFactures([]); // non fourni par la vue actuelle
 
-      // 8) Groupes par type (FactureLigneGroupe)
-      const groupesMap: Record<string, FactureLigneGroupe> = {};
-      lignes.forEach((l) => {
+      // Regroupements par type (pour barres et syntheses)
+      const groupeSynthese = (lignes || []).reduce<LigneGroupeSynthese[]>((acc, l) => {
         const key = `${f.id}-${l.ligne_type}`;
-        if (!groupesMap[key]) {
-          groupesMap[key] = {
+        let existing = acc.find((g) => g.group_key === key);
+        if (!existing) {
+          existing = {
             facture_id: f.id,
             facture_num: f.numero_facture,
             facture_date: String(f.date),
             ligne_type: l.ligne_type,
             group_key: key,
-            match_type: l.ligne_type,
-            match_net: 0,
-            prix_abo: 0,
+            prixAbo: 0,
             count: 0,
             abo: 0,
-            conso: 0,
             remises: 0,
             netAbo: 0,
+            conso: 0,
             achat: 0,
+            total: 0,
           };
+          acc.push(existing);
         }
-        const g = groupesMap[key];
-        g.count += 1;
-        g.abo += l.abo || 0;
-        g.remises += l.remises || 0;
-        g.netAbo += (l.abo || 0) + (l.remises || 0);
-        g.conso += l.conso || 0;
-        g.achat += l.achat || 0;
+        existing.count += 1;
+        existing.abo += l.abo;
+        existing.remises += l.remises;
+        existing.netAbo += l.abo + l.remises;
+        existing.conso += l.conso;
+        existing.achat += l.achat;
+        existing.total += l.total_ht;
+        return acc;
+      }, []);
+      groupeSynthese.forEach((g) => {
+        g.prixAbo = g.count ? g.netAbo / g.count : 0;
       });
-      const groupes = Object.values(groupesMap).map((g) => {
-        const unitNet = g.count ? g.netAbo / g.count : 0;
-        return { ...g, prix_abo: unitNet, match_net: unitNet };
-      });
-      setFactureLigneGroupes(groupes);
+      setLigneGroupesFacture(groupeSynthese);
+
+      // Stats mensuelles (pour delta/affichages)
+      setFactureMonths(detailStats.months || []);
+
+      // Abonnements et rapport (routes backend deja en v2)
+      await fetchFactureAbonnements();
+      await fetchRapport();
     } catch (err) {
-      console.error("Erreur lors du chargement des donnees detaillees", err);
+      console.error(err);
+      setError((err as Error)?.message || "Erreur lors du chargement des donnees");
     } finally {
       setIsLoading(false);
     }
   }
-
 
 
   function VariationBadge({ current, previous }: { current: number; previous?: number | null }) {
@@ -1141,14 +1097,13 @@ export default function CompteDetailModal({
       [factureId]: {
         ...(prev[factureId] || {}),
         [groupKey]: {
+          mode: "existing",
           ...(prev[factureId]?.[groupKey] || {}),
-          mode: update.mode ?? prev[factureId]?.[groupKey]?.mode ?? "existing",
           ...update,
         },
       },
     }));
   }
-
 
   const statutToCode: Record<StatutValeur, number> = { a_verifier: 0, valide: 1, conteste: 2 };
 
@@ -1241,9 +1196,8 @@ export default function CompteDetailModal({
   }
 
   function closeAboModal() {
-    setAboModal({ open: false, groupKey: null, lineIds: [] });
+    setAboModal({ open: false, groupKey: null });
   }
-
 
   async function applyGroupStatutToLines(factureId: number, groupKey: string, value: StatutValeur) {
     const group = ligneGroupesFacture.find((g) => g.group_key === groupKey);

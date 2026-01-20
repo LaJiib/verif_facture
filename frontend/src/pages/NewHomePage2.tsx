@@ -1,6 +1,13 @@
 
 import { useState, useEffect } from "react";
-import { executeQuery, deleteEntreprise, fetchUploadsForEntreprise, deleteUpload, API_BASE_URL, type UploadMeta } from "../newApi";
+import {
+  deleteEntreprise,
+  fetchUploadsForEntreprise,
+  deleteUpload,
+  API_BASE_URL,
+  type UploadMeta,
+  fetchEntrepriseDashboard,
+} from "../newApi";
 import { decodeFactureStatus, decodeLineType } from "../utils/codecs";
 import { StatusBar } from "../utils/statusBar";
 import { computeVariation } from "../utils/variation";
@@ -63,125 +70,95 @@ export default function HomePage({
 
   async function loadStats() {
     try {
-      const globalQuery = `
-        SELECT
-          (SELECT COUNT(*) FROM comptes c WHERE c.entreprise_id = ${entrepriseId}) as nb_comptes,
-          (SELECT COUNT(*) FROM lignes l JOIN comptes c2 ON l.compte_id = c2.id WHERE c2.entreprise_id = ${entrepriseId}) as nb_lignes,
-          (SELECT COUNT(*) FROM factures f JOIN comptes c3 ON f.compte_id = c3.id WHERE c3.entreprise_id = ${entrepriseId}) as nb_factures
-      `;
+      const dashboard = await fetchEntrepriseDashboard(entrepriseId);
 
-      const lignesParTypeQuery = `
-        SELECT l.type as type, COUNT(*) as count
-        FROM lignes l
-        JOIN comptes c ON l.compte_id = c.id
-        WHERE c.entreprise_id = ${entrepriseId}
-        GROUP BY l.type
-        ORDER BY count DESC
-      `;
+      setStats({
+        nb_comptes: dashboard.stats.nb_comptes,
+        nb_lignes: dashboard.stats.nb_lignes,
+        nb_factures: dashboard.stats.nb_factures,
+      });
 
-      const statutsGlobalQuery = `
-        SELECT f.statut as statut, COUNT(*) as count
-        FROM factures f
-        JOIN comptes c ON f.compte_id = c.id
-        WHERE c.entreprise_id = ${entrepriseId}
-        GROUP BY f.statut
-      `;
-
-      const monthsTotalsQuery = `
-        SELECT strftime('%Y-%m', f.date) as mois,
-               SUM(f.abo + f.conso + f.remises + f.achat) as total_ht,
-               SUM(f.abo) as abo,
-               SUM(f.conso) as conso,
-               SUM(f.remises) as remises,
-               SUM(f.achat) as achat,
-               COUNT(DISTINCT f.id) as nb_factures
-        FROM factures f
-        JOIN comptes c ON f.compte_id = c.id
-        WHERE c.entreprise_id = ${entrepriseId}
-        GROUP BY mois
-        ORDER BY mois DESC
-        LIMIT 2
-      `;
-
-      const [globalResult, lignesResult, statutsResult, monthsTotalsResult] = await Promise.all([
-        executeQuery(globalQuery),
-        executeQuery(lignesParTypeQuery),
-        executeQuery(statutsGlobalQuery),
-        executeQuery(monthsTotalsQuery),
-      ]);
-
-      if (globalResult.data && globalResult.data.length > 0) {
-        setStats({
-          nb_comptes: globalResult.data[0].nb_comptes || 0,
-          nb_lignes: globalResult.data[0].nb_lignes || 0,
-          nb_factures: globalResult.data[0].nb_factures || 0,
-        });
-      }
-
-      setLignesParType(
-        (lignesResult.data || []).map((row: any) => ({
-          type: Number(row.type),
-          count: row.count || 0,
-        }))
-      );
+      setLignesParType(dashboard.lignes_par_type.map((row) => ({ type: Number(row.type), count: Number(row.count) })));
 
       const statutsMap: Record<number, number> = {};
-      (statutsResult.data || []).forEach((row: any) => {
-        const key = typeof row.statut === "number" ? row.statut : -1;
-        statutsMap[key] = row.count || 0;
+      Object.entries(dashboard.statuts_global || {}).forEach(([k, v]) => {
+        statutsMap[Number(k)] = Number(v as number);
       });
       setStatutsGlobal(statutsMap);
 
-      const moisCourant = monthsTotalsResult.data?.[0];
-      const moisPrecedent = monthsTotalsResult.data?.[1];
-
-      if (moisCourant) {
-        const moisKey = moisCourant.mois;
-        const lastMonthStatusQuery = `
-          SELECT f.statut as statut, COUNT(*) as count
-          FROM factures f
-          JOIN comptes c ON f.compte_id = c.id
-          WHERE c.entreprise_id = ${entrepriseId}
-            AND strftime('%Y-%m', f.date) = '${moisKey}'
-          GROUP BY f.statut
-        `;
-        const lmStatusResult = await executeQuery(lastMonthStatusQuery);
-        const statutsDernierMois: Record<number, number> = {};
-        (lmStatusResult.data || []).forEach((row: any) => {
-          const key = typeof row.statut === "number" ? row.statut : -1;
-          statutsDernierMois[key] = row.count || 0;
+      if (dashboard.last_month) {
+        const lm = dashboard.last_month;
+        const lmStatuts: Record<number, number> = {};
+        Object.entries(lm.statuts || {}).forEach(([k, v]) => {
+          lmStatuts[Number(k)] = Number(v as number);
         });
 
-        const variation = computeVariation(
-          moisCourant.total_ht || 0,
-          moisPrecedent?.total_ht ?? null
-        );
-        const deltaPct = variation.deltaPct;
-        const trend = variation.direction === "neutral" ? "flat" : variation.direction;
-
         const categories: LastMonthStats["categories"] = [
-          { key: "abo", label: "Abo", value: moisCourant.abo || 0, deltaPct: null, trend: "flat" },
-          { key: "conso", label: "Conso", value: moisCourant.conso || 0, deltaPct: null, trend: "flat" },
-          { key: "remises", label: "Remises", value: moisCourant.remises || 0, deltaPct: null, trend: "flat" },
-          { key: "achat", label: "Achats", value: moisCourant.achat || 0, deltaPct: null, trend: "flat" },
+          {
+            key: "abo",
+            label: "Abo",
+            value: lm.categories.abo || 0,
+            deltaPct: lm.categories_delta?.abo ?? null,
+            trend:
+              lm.categories_delta?.abo == null
+                ? "flat"
+                : lm.categories_delta.abo > 0
+                ? "up"
+                : lm.categories_delta.abo < 0
+                ? "down"
+                : "flat",
+          },
+          {
+            key: "conso",
+            label: "Conso",
+            value: lm.categories.conso || 0,
+            deltaPct: lm.categories_delta?.conso ?? null,
+            trend:
+              lm.categories_delta?.conso == null
+                ? "flat"
+                : lm.categories_delta.conso > 0
+                ? "up"
+                : lm.categories_delta.conso < 0
+                ? "down"
+                : "flat",
+          },
+          {
+            key: "remises",
+            label: "Remises",
+            value: lm.categories.remises || 0,
+            deltaPct: lm.categories_delta?.remises ?? null,
+            trend:
+              lm.categories_delta?.remises == null
+                ? "flat"
+                : lm.categories_delta.remises > 0
+                ? "up"
+                : lm.categories_delta.remises < 0
+                ? "down"
+                : "flat",
+          },
+          {
+            key: "achat",
+            label: "Achats",
+            value: lm.categories.achat || 0,
+            deltaPct: lm.categories_delta?.achat ?? null,
+            trend:
+              lm.categories_delta?.achat == null
+                ? "flat"
+                : lm.categories_delta.achat > 0
+                ? "up"
+                : lm.categories_delta.achat < 0
+                ? "down"
+                : "flat",
+          },
         ];
-        if (moisPrecedent) {
-          categories.forEach((cat) => {
-            const prevVal = moisPrecedent[cat.key] || null;
-            const catVariation = computeVariation(cat.value, prevVal);
-            cat.deltaPct = catVariation.deltaPct;
-            cat.trend =
-              catVariation.direction === "neutral" ? "flat" : catVariation.direction;
-          });
-        }
 
         setLastMonthStats({
-          mois: moisKey,
-          total_ht: moisCourant.total_ht || 0,
-          nb_factures: moisCourant.nb_factures || 0,
-          statuts: statutsDernierMois,
-          deltaPct,
-          trend,
+          mois: lm.mois,
+          total_ht: lm.total_ht || 0,
+          nb_factures: lm.nb_factures || 0,
+          statuts: lmStatuts,
+          deltaPct: lm.delta_pct ?? null,
+          trend: (lm.trend as any) ?? null,
           categories,
         });
       } else {
@@ -700,7 +677,7 @@ export default function HomePage({
                     Supprimer
                   </button>
                   <a
-                    href={`${API_BASE_URL}/uploads/${selectedUpload.upload_id}/download`}
+                    href={`${API_BASE_URL}/v2/read/uploads/${selectedUpload.upload_id}/download`}
                     style={{
                       background: "#3b82f6",
                       color: "white",
