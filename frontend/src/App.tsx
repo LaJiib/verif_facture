@@ -5,14 +5,16 @@ import EntreprisePage from "./pages/NewEntreprisePage";
 import ImportPage from "./pages/NewImportPage";
 import CreateEntreprisePage from "./pages/CreateEntreprisePage";
 import CsvFormatsSettingsPage from "./pages/CsvFormatsSettingsPage";
-import { fetchEntreprises } from "./newApi";
-import { CsvFormatConfig, loadCsvFormats, upsertCsvFormat } from "./utils/csvFormats";
+import AbonnementsPage from "./pages/AbonnementsPage";
+import { fetchEntreprises, fetchCsvFormatsBackend, saveCsvFormatBackend } from "./newApi";
+import { CsvFormatConfig, loadCsvFormats, upsertCsvFormat, ensureDefaultFormat } from "./utils/csvFormats";
 
 type Route =
   | { page: "home" }
   | { page: "factures" }
   | { page: "import" }
   | { page: "settings" }
+  | { page: "abonnements" }
   | { page: "create-entreprise" };
 
 export default function App() {
@@ -24,7 +26,7 @@ export default function App() {
   // Charger les entreprises au démarrage
   useEffect(() => {
     loadEntreprises();
-    setCsvFormats(loadCsvFormats());
+    loadFormats();
   }, []);
 
   async function loadEntreprises() {
@@ -38,6 +40,24 @@ export default function App() {
       }
     } catch (error) {
       console.error("Erreur lors du chargement des entreprises:", error);
+    }
+  }
+
+  async function loadFormats() {
+    try {
+      const serverFormats = await fetchCsvFormatsBackend();
+      const normalized = ensureDefaultFormat(serverFormats);
+      setCsvFormats(normalized);
+      try {
+        if (typeof localStorage !== "undefined") {
+          localStorage.setItem("csvFormats", JSON.stringify(normalized));
+        }
+      } catch {
+        // ignore storage errors
+      }
+    } catch (error) {
+      console.warn("Impossible de charger les formats depuis le backend, fallback stockage local", error);
+      setCsvFormats(loadCsvFormats());
     }
   }
 
@@ -57,6 +77,10 @@ export default function App() {
     setRoute({ page: "settings" });
   }
 
+  function navigateToAbonnements() {
+    setRoute({ page: "abonnements" });
+  }
+
   function navigateToCreateEntreprise() {
     setRoute({ page: "create-entreprise" });
   }
@@ -67,8 +91,16 @@ export default function App() {
   }
 
   function handleSaveCsvFormat(format: CsvFormatConfig) {
-    const updated = upsertCsvFormat(format, csvFormats);
-    setCsvFormats(updated);
+    saveCsvFormatBackend(format)
+      .then((saved) => {
+        const updated = upsertCsvFormat(saved, csvFormats);
+        setCsvFormats(updated);
+      })
+      .catch((err) => {
+        console.warn("Sauvegarde format backend impossible, fallback local", err);
+        const updated = upsertCsvFormat(format, csvFormats);
+        setCsvFormats(updated);
+      });
   }
 
   // Si aucune entreprise n'est sélectionnée
@@ -121,6 +153,7 @@ export default function App() {
             entrepriseNom={currentEntreprise?.nom || ""}
             onNavigateToFactures={navigateToFactures}
             onNavigateToImport={navigateToImport}
+            onNavigateToAbonnements={navigateToAbonnements}
             onReloadEntreprises={loadEntreprises}
           />
         )}
@@ -138,6 +171,10 @@ export default function App() {
             csvFormats={csvFormats}
             onBack={navigateToHome}
           />
+        )}
+
+        {route.page === "abonnements" && currentEntrepriseId && (
+          <AbonnementsPage entrepriseId={currentEntrepriseId} entrepriseNom={currentEntreprise?.nom || ""} onBack={navigateToHome} />
         )}
 
         {route.page === "settings" && (

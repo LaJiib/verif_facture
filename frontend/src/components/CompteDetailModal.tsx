@@ -21,6 +21,7 @@ import { exportFactureReportDocx } from "../utils/docxReport";
 import { runAutoVerification, StatutValeur, LigneAnomalie } from "../utils/autoVerification";
 import { importCSV } from "../csvImporter";
 import { fetchUploadContent } from "../newApi";
+import LigneInsightModal from "./LigneInsightModal";
 
 function useViewportWidth(): number {
   const [width, setWidth] = useState<number>(() => (typeof window !== "undefined" ? window.innerWidth : 1280));
@@ -80,6 +81,8 @@ interface DetailLigne {
   ligne_id: number;
   ligne_num: string;
   ligne_type: number;
+  ligne_nom: string;
+  sous_compte?: string | null;
   ligne_statut?: number;
   abo_id_ref?: number | null;
   abo_nom_ref?: string | null;
@@ -257,6 +260,7 @@ export default function CompteDetailModal({
   const [factureGroupAbonnements, setFactureGroupAbonnements] = useState<Record<number, Record<string, AbonnementSelection>>>({});
   const [abonnements, setAbonnements] = useState<Abonnement[]>([]);
   const [abonnementsLoading, setAbonnementsLoading] = useState(false);
+  const [ligneModalId, setLigneModalId] = useState<number | null>(null);
   const [aboModal, setAboModal] = useState<{ open: boolean; groupKey: string | null; lineIds: number[] }>({
     open: false,
     groupKey: null,
@@ -283,6 +287,8 @@ export default function CompteDetailModal({
   const tabPaddingY = isWideDialog ? "1rem" : "0.9rem";
   const tabPaddingX = isWideDialog ? "1.6rem" : "1.2rem";
   const [rapportPanelCollapsed, setRapportPanelCollapsed] = useState(false);
+  const [selectedSousComptesTab, setSelectedSousComptesTab] = useState<Set<string>>(new Set());
+  const [sousCompteTabOpen, setSousCompteTabOpen] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -534,8 +540,10 @@ export default function CompteDetailModal({
           const nextYear = month === "12" ? String(Number(year) + 1) : year;
           const endExclusive = `${nextYear}-${nextMonth}-01`;
           facturesListe = await fetchFactures({ compte_id: compteId, date_debut: start, date_fin: endExclusive });
+          console.log("[FACTURES][LIST]", { filters: { compte_id: compteId, date_debut: start, date_fin: endExclusive }, count: facturesListe.length });
         } else {
           facturesListe = await fetchFactures({ compte_id: compteId });
+          console.log("[FACTURES][LIST]", { filters: { compte_id: compteId }, count: facturesListe.length });
         }
       } catch (inner) {
         console.warn("Impossible de recuperer la liste des factures", inner);
@@ -556,6 +564,7 @@ export default function CompteDetailModal({
       }
 
       const detailStats: FactureDetailStats = await fetchFactureDetailStats(targetFactureId);
+      console.log("[FACTURE][DETAIL_STATS]", { factureId: targetFactureId, stats: detailStats });
 
       // 2) Stats globales
       const aggregatedStats =
@@ -596,7 +605,9 @@ export default function CompteDetailModal({
       const lignes: DetailLigne[] = lignesRaw.map((l) => ({
         ligne_id: l.ligne_id,
         ligne_num: l.ligne_num,
+        ligne_nom: (l as any).nom ?? null,
         ligne_type: l.ligne_type,
+        sous_compte: (l as any).sous_compte ?? null,
         ligne_statut: l.statut,
         abo_id_ref: (l as any).abo_id_ref ?? null,
         abo_nom_ref: (l as any).abo_nom_ref ?? null,
@@ -611,7 +622,6 @@ export default function CompteDetailModal({
       const typesMap: Record<number, number> = {};
       lignes.forEach((l) => (typesMap[l.ligne_id] = l.ligne_type ?? 3));
       setEditedTypes(typesMap);
-
       // 4) Factures du périmètre (liste) + facture courante
       const f = detailStats.facture_detail.facture;
       const facturesDetail: FactureDetail[] =
@@ -709,6 +719,7 @@ export default function CompteDetailModal({
       const prevList: DetailLigne[] = Object.entries(detailStats.lignes_by_id || {}).map(([id, v]) => ({
         ligne_id: Number(id),
         ligne_num: String(id),
+        ligne_nom: (v as any).nom ?? null,
         ligne_type: (v as any).ligne_type ?? 3,
         ligne_statut: (v as any).statut,
         abo: (v as any).abo ?? 0,
@@ -798,8 +809,48 @@ export default function CompteDetailModal({
     );
   }
 
+  const typesDisponibles = Array.from(
+    new Set(detailLignes.map((l) => (l.ligne_type ?? 3)))
+  ).sort((a, b) => a - b);
+
+  const sousComptesDisponiblesTab = useMemo(
+    () => Array.from(new Set(detailLignes.map((l) => l.sous_compte || "__sans__"))),
+    [detailLignes]
+  );
+
+  useEffect(() => {
+    // Initialise ou synchronise la sélection sous-compte (onglet lignes) en fonction des données disponibles
+    if (sousComptesDisponiblesTab.length === 0) {
+      setSelectedSousComptesTab(new Set());
+      return;
+    }
+    // Conserve seulement les sous-comptes encore disponibles
+    const intersection = new Set<string>();
+    selectedSousComptesTab.forEach((s) => {
+      if (sousComptesDisponiblesTab.includes(s)) intersection.add(s);
+    });
+    if (intersection.size === 0) {
+      setSelectedSousComptesTab(new Set(sousComptesDisponiblesTab));
+    } else if (intersection.size !== selectedSousComptesTab.size) {
+      setSelectedSousComptesTab(intersection);
+    }
+  }, [sousComptesDisponiblesTab, selectedSousComptesTab]);
+
+  const lignesFiltrees = useMemo(() => {
+    const hasTypeFilter = selectedTypes.size > 0;
+    const hasSousCompteFilter = selectedSousComptesTab.size > 0;
+    return detailLignes.filter((l) => {
+      const matchType = hasTypeFilter ? selectedTypes.has(l.ligne_type ?? 3) : true;
+      const matchSous = hasSousCompteFilter ? selectedSousComptesTab.has(l.sous_compte || "__sans__") : true;
+      return matchType && matchSous;
+    });
+  }, [detailLignes, selectedTypes, selectedSousComptesTab]);
+
+  const statsAffichees = statsGlobales;
+  const prevStatsAffichees = prevStatsGlobales;
+
   const lignesGroupes: LigneGroupeSynthese[] = Object.values(
-      detailLignes.reduce((acc, ligne) => {
+      lignesFiltrees.reduce((acc, ligne) => {
         const typeLabel = decodeLineType(ligne.ligne_type);
         const netUnit = Number(((ligne.abo || 0) + (ligne.remises || 0)).toFixed(2));
         const groupType = ligne.ligne_type ?? 3;
@@ -835,15 +886,6 @@ export default function CompteDetailModal({
     }, {} as Record<string, LigneGroupeSynthese>)
   ).sort((a, b) => b.total - a.total);
 
-  const typesDisponibles = Array.from(
-    new Set(detailLignes.map((l) => (l.ligne_type ?? 3)))
-  ).sort((a, b) => a - b);
-
-  const lignesFiltrees = useMemo(() => {
-    if (selectedTypes.size === 0) return [];
-    return detailLignes.filter((l) => selectedTypes.has(l.ligne_type ?? 3));
-  }, [detailLignes, selectedTypes]);
-
   useEffect(() => {
     // Initialise le filtre type une seule fois avec tous les types presents,
     // puis ajoute uniquement les nouveaux types si besoin.
@@ -873,6 +915,8 @@ export default function CompteDetailModal({
     });
     if (updated) setSelectedTypes(next);
   }, [typesDisponibles, typesInitialized, selectedTypes]);
+
+  // plus de filtre sous-compte
 
   const facturesAvecEcart = detailFactures.map((facture) => {
     const lignes = factureLignesResume.find((fl) => fl.facture_id === facture.facture_id);
@@ -966,24 +1010,10 @@ export default function CompteDetailModal({
       const parsed = parseKey(key);
       const resolvedKey = resolveKey(parsed);
       const existing = byKey.get(resolvedKey);
-      const group =
-        existing?.group ||
-        ({
-          facture_id: fid,
-          group_key: resolvedKey,
-          ligne_type: parsed.lineType ?? 3,
-          count: 0,
-          abo: 0,
-          conso: 0,
-          remises: 0,
-          netAbo: parsed.net ?? 0,
-          achat: 0,
-          match_net: parsed.net ?? 0,
-          prix_abo: parsed.net ?? 0,
-        } as any);
+      // Si aucun groupe courant ne correspond, on ignore l'ancien enregistrement pour ne pas afficher un regroupement vide
+      if (!existing) return;
       byKey.set(resolvedKey, {
-        key: resolvedKey,
-        group,
+        ...existing,
         stat: value,
         comment: (commentMap as any)[key],
         anomalies: (anomaliesMap as any)[key] || [],
@@ -1103,6 +1133,9 @@ export default function CompteDetailModal({
     try {
       setAboModalSaving(true);
       const resp = await attachAbonnementToLines(payload);
+      if (!resp || !resp.abonnement || typeof resp.abonnement.id === "undefined") {
+        throw new Error("Réponse attachement abonnement invalide");
+      }
       const newKey = `abo|${resp.abonnement.id}|${groupType ?? ""}|${(targetNet ?? 0).toFixed(2)}`;
       setAbonnements((prev) => {
         const existing = prev.find((a) => a.id === resp.abonnement.id);
@@ -1520,31 +1553,7 @@ export default function CompteDetailModal({
         alert((err as Error).message || "Impossible de charger les lignes de la facture");
         return;
       }
-      const missingAbos: string[] = [];
-
-      // Verifie que chaque groupe conteste a une selection d'abonnement
-      contestedGroups.forEach(([groupKey]) => {
-        const selection = groupAbos[groupKey];
-        const group = ligneGroupesFacture.find((g) => g.group_key === groupKey);
-        const label =
-          group?.abo_nom && group.abo_id
-            ? `${group.abo_nom} (${Number((group.match_net || 0)).toFixed(2)} €)`
-            : `${decodeLineType(group?.match_type ?? 3)} (${Number((group?.match_net || 0)).toFixed(2)} €)`;
-        if (!selection) {
-          missingAbos.push(label);
-        } else if (selection.mode === "existing" && !selection.abonnementId) {
-          missingAbos.push(label);
-        } else if (selection.mode === "new" && !selection.nom) {
-          missingAbos.push(label);
-        }
-      });
-
-      if (missingAbos.length > 0) {
-        alert(`Selectionne un type d'abonnement pour chaque groupe conteste :\n- ${missingAbos.join("\n- ")}`);
-        return;
-      }
-
-      // Attache les abonnements aux lignes concernees
+      // Contestation : on attache un abonnement uniquement si une sélection est fournie; sinon on laisse vide.
       for (const [groupKey] of contestedGroups) {
         const selection = groupAbos[groupKey];
         if (!selection) continue;
@@ -1573,6 +1582,10 @@ export default function CompteDetailModal({
           attachPayload.abonnement_id = selection.abonnementId;
         } else if (selection.mode === "new" && selection.nom) {
           attachPayload.nom = selection.nom;
+        }
+        // si aucune info abo, on laisse le groupe contesté sans attachement
+        if (!attachPayload.abonnement_id && !attachPayload.nom) {
+          continue;
         }
 
         try {
@@ -1647,9 +1660,18 @@ export default function CompteDetailModal({
       else newStatut = 0;
 
       if (newStatut !== null) {
-        console.log("[FACTURE][STATUS][REQUEST]", { factureId: selectedFactureId, statut: newStatut });
-        await updateFacture(selectedFactureId, { statut: newStatut });
-        console.log("[FACTURE][STATUS][SUCCESS]", { factureId: selectedFactureId, statut: newStatut });
+        // On ne pousse plus le statut au backend ici : le backend recalcule et applique le statut à partir des lignes/rapport.
+        const statMapRaw = factureGroupStatuts[selectedFactureId] || {};
+        const normalizeGroupKey = (key: string) => {
+          if (key.startsWith("price|") || key.startsWith("abo|")) return key;
+          const parts = key.split("|");
+          if (parts.length === 2) {
+            const [type, net] = parts;
+            return `price|${type}|${Number(net).toFixed(2)}`;
+          }
+          return key;
+        };
+        // Les statuts de regroupement seront appliqués côté backend (upsert rapport)
         // Recharge les donnees pour refleter le nouveau statut
         loadData();
         if (factureCourante) {
@@ -1792,19 +1814,22 @@ export default function CompteDetailModal({
           </button>
         )}
 
+      {ligneModalId !== null && <LigneInsightModal ligneId={ligneModalId} onClose={() => setLigneModalId(null)} />}
+
         {/* Header */}
-                        <div
-                          style={{
-                            padding: blockPadding,
-                            borderBottom: "1px solid #e5e7eb",
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            gap: "1rem",
-                          }}
-                        >
-                          <div>
-                            <h2 style={{ margin: 0, fontSize: "1.5rem" }}>
+        <div
+          style={{
+            padding: blockPadding,
+            borderBottom: "1px solid #e5e7eb",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: "1rem",
+            flexWrap: "wrap",
+          }}
+        >
+          <div>
+            <h2 style={{ margin: 0, fontSize: "1.5rem" }}>
               {compteNom || compteNum}
               {mois && (
                 <span style={{ color: "#6b7280", fontSize: "1.25rem", marginLeft: "0.75rem" }}>
@@ -1816,19 +1841,21 @@ export default function CompteDetailModal({
               Compte n° {compteNum}
             </p>
           </div>
-          <button
-            onClick={onClose}
-            style={{
-              background: "none",
-              border: "none",
-              fontSize: "1.5rem",
-              cursor: "pointer",
-              color: "#6b7280",
-              padding: "0.5rem",
-            }}
-          >
-            ×
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+            <button
+              onClick={onClose}
+              style={{
+                background: "none",
+                border: "none",
+                fontSize: "1.5rem",
+                cursor: "pointer",
+                color: "#6b7280",
+                padding: "0.5rem",
+              }}
+            >
+              ×
+            </button>
+          </div>
         </div>
 
         {/* Tabs */}
@@ -2142,10 +2169,92 @@ export default function CompteDetailModal({
               {activeTab === "lignes" && (
                 <div>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
-                    <h3 style={{ margin: 0 }}>
-                      {lignesFiltrees.length} ligne(s) telecom
-                      {selectedTypes.size === typesDisponibles.length ? "" : ` / ${detailLignes.length}`}
-                    </h3>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+                      <h3 style={{ margin: 0 }}>
+                        {lignesFiltrees.length} ligne(s) telecom
+                        {selectedTypes.size === typesDisponibles.length && selectedSousComptesTab.size === sousComptesDisponiblesTab.length
+                          ? ""
+                          : ` / ${detailLignes.length}`}
+                      </h3>
+                      <div style={{ position: "relative" }}>
+                        <button
+                          className="secondary-button"
+                          style={{ padding: "0.3rem 0.55rem", fontSize: "0.85rem", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
+                          onClick={() => setSousCompteTabOpen((prev) => !prev)}
+                        >
+                          Sous-compte
+                          {selectedSousComptesTab.size > 0 && selectedSousComptesTab.size < sousComptesDisponiblesTab.length && (
+                            <span style={{ background: "#e0f2fe", color: "#0369a1", padding: "0.05rem 0.4rem", borderRadius: "999px", fontWeight: 700 }}>
+                              {selectedSousComptesTab.size}/{sousComptesDisponiblesTab.length}
+                            </span>
+                          )}
+                        </button>
+                        {sousCompteTabOpen && (
+                          <div
+                            style={{
+                              position: "absolute",
+                              top: "calc(100% + 0.4rem)",
+                              left: 0,
+                              background: "white",
+                              border: "1px solid #e5e7eb",
+                              borderRadius: "0.5rem",
+                              boxShadow: "0 10px 28px rgba(0,0,0,0.12)",
+                              padding: "0.65rem",
+                              zIndex: 20,
+                              minWidth: "220px",
+                            }}
+                          >
+                            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.45rem", flexWrap: "wrap" }}>
+                              <button
+                                className="secondary-button"
+                                style={{ padding: "0.3rem 0.55rem", fontWeight: 600 }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedSousComptesTab(new Set(sousComptesDisponiblesTab));
+                                }}
+                              >
+                                Tout
+                              </button>
+                              <button
+                                className="secondary-button"
+                                style={{ padding: "0.3rem 0.55rem", fontWeight: 600 }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedSousComptesTab(new Set());
+                                }}
+                              >
+                                Aucun
+                              </button>
+                            </div>
+                            <div style={{ display: "grid", gap: "0.35rem", maxHeight: "220px", overflowY: "auto" }}>
+                              {sousComptesDisponiblesTab.map((s) => {
+                                const checked = selectedSousComptesTab.has(s);
+                                const label = s === "__sans__" ? "Sans sous-compte" : s;
+                                return (
+                                  <label key={`souscompte-tab-${s}`} style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={checked}
+                                      onChange={(e) => {
+                                        e.stopPropagation();
+                                        setSelectedSousComptesTab((prev) => {
+                                          const next = new Set(prev);
+                                          if (next.has(s)) next.delete(s);
+                                          else next.add(s);
+                                          return next;
+                                        });
+                                      }}
+                                    />
+                                    <span>{label}</span>
+                                  </label>
+                                );
+                              })}
+                              {sousComptesDisponiblesTab.length === 0 && <span style={{ color: "#9ca3af" }}>Aucun sous-compte</span>}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
                   <div style={{ overflow: "auto" }}>
                     <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -2161,7 +2270,19 @@ export default function CompteDetailModal({
                               )
                         }
                       >
-                        Numero {ligneSort?.field === "ligne_num" ? (ligneSort.direction === "asc" ? "↑" : "↓") : ""}
+                        Numero {ligneSort?.field === "ligne_num" ? (ligneSort.direction === "asc" ? "?" : "?") : ""}
+                      </th>
+                      <th
+                        style={{ padding: "0.75rem", textAlign: "left", fontWeight: "600", cursor: "pointer", minWidth: "180px" }}
+                        onClick={() =>
+                          setLigneSort((prev) =>
+                            prev?.field === ("nom" as keyof DetailLigne)
+                              ? { field: "nom" as keyof DetailLigne, direction: prev.direction === "asc" ? "desc" : "asc" }
+                              : { field: "nom" as keyof DetailLigne, direction: "asc" }
+                          )
+                        }
+                      >
+                        Nom de la ligne {ligneSort?.field === ("nom" as keyof DetailLigne) ? (ligneSort.direction === "asc" ? "?" : "?") : ""}
                       </th>
                       <th style={{ padding: "0.75rem", textAlign: "left", fontWeight: "600", position: "relative", minWidth: "180px" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
@@ -2321,14 +2442,22 @@ export default function CompteDetailModal({
                             }
                             return 0;
                           }) as DetailLigne[]).map((ligne, idx) => (
-                          <tr
-                            key={idx}
-                            style={{
-                              borderBottom: "1px solid #e5e7eb",
-                              background: idx % 2 === 0 ? "white" : "#f9fafb",
+                            <tr
+                              key={idx}
+                              style={{
+                            borderBottom: "1px solid #e5e7eb",
+                            background: idx % 2 === 0 ? "white" : "#f9fafb",
                             }}
                           >
-                            <td style={{ padding: "0.75rem", fontWeight: "500" }}>{ligne.ligne_num}</td>
+                          <td
+                            style={{ padding: "0.75rem", fontWeight: "500", cursor: "pointer", color: "#0f172a" }}
+                            onClick={() => setLigneModalId(ligne.ligne_id)}
+                          >
+                            {ligne.ligne_num}
+                          </td>
+                            <td style={{ padding: "0.75rem", color: "#4b5563", fontSize: "0.9rem" }}>
+                              {ligne.ligne_nom || "—"}
+                            </td>
                             <td style={{ padding: "0.75rem", color: "#6b7280", fontSize: "0.875rem" }}>
                               <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
                                 {(() => {
@@ -2431,7 +2560,30 @@ export default function CompteDetailModal({
                               </div>
                             </td>
                           </tr>
-                        ))}
+                        ))} 
+                        {lignesFiltrees.length > 0 && (
+                          <tr style={{ background: "#f9fafb", fontWeight: 700 }}>
+                            <td style={{ padding: "0.65rem" }} colSpan={5}>
+                              Total affiché
+                            </td>
+                            <td style={{ padding: "0.65rem", textAlign: "right" }}>
+                              {lignesFiltrees.reduce((acc, l) => acc + Number(l.abo || 0), 0).toFixed(2)} €
+                            </td>
+                            <td style={{ padding: "0.65rem", textAlign: "right" }}>
+                              {lignesFiltrees.reduce((acc, l) => acc + Number(l.conso || 0), 0).toFixed(2)} €
+                            </td>
+                            <td style={{ padding: "0.65rem", textAlign: "right" }}>
+                              {lignesFiltrees.reduce((acc, l) => acc + Number(l.remises || 0), 0).toFixed(2)} €
+                            </td>
+                            <td style={{ padding: "0.65rem", textAlign: "right" }}>
+                              {lignesFiltrees.reduce((acc, l) => acc + Number(l.achat || 0), 0).toFixed(2)} €
+                            </td>
+                            <td style={{ padding: "0.65rem", textAlign: "right" }}>
+                              {lignesFiltrees.reduce((acc, l) => acc + Number(l.total_ht || 0), 0).toFixed(2)} €
+                            </td>
+                            <td />
+                          </tr>
+                        )}
                         {lignesFiltrees.length === 0 && (
                           <tr>
                             <td colSpan={8} style={{ padding: "1rem", textAlign: "center", color: "#6b7280" }}>

@@ -1,4 +1,5 @@
 export type CsvDateFormat = "DD/MM/YYYY" | "YYYY-MM-DD";
+export const REQUIRED_CSV_COLUMNS = ["numeroCompte", "numeroFacture", "date", "montantHT", "numeroAcces"] as const;
 
 export interface CsvFormatConfig {
   id: string;
@@ -15,6 +16,8 @@ export interface CsvFormatConfig {
     montantHT: string;
     niveauCharge?: string;
     typeCharge?: string;
+    nomLigne?: string;
+    sousCompte?: string;
   };
 }
 
@@ -35,6 +38,8 @@ export const DEFAULT_CSV_FORMAT: CsvFormatConfig = {
     montantHT: "Montant (€ HT)",
     niveauCharge: "Niveau de charge",
     typeCharge: "Type de charge",
+    nomLigne: "Nom ligne",
+    sousCompte: "Sous-compte",
   },
 };
 

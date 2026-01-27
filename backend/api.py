@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +22,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api_v2")
 
+# File logging (rotating) for backend
+LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "backend.log"
+if not any(isinstance(h, RotatingFileHandler) for h in logging.getLogger().handlers):
+    file_handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    logging.getLogger().addHandler(file_handler)
+
 # Ensure DB schema exists
 Base.metadata.create_all(bind=engine)
 
@@ -27,9 +44,14 @@ Base.metadata.create_all(bind=engine)
 def create_app() -> FastAPI:
     app = FastAPI(title="Vérification Factures Télécom - API v2", version="2.0.0")
 
+    allowed_origins = [
+        os.getenv("FRONTEND_ORIGIN", "http://localhost:5173"),
+        os.getenv("FRONTEND_ORIGIN_ALT", "http://127.0.0.1:5173"),
+    ]
+    allowed_origins = [o for o in allowed_origins if o]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

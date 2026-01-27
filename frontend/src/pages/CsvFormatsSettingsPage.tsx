@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, FormEvent } from "react";
-import { CsvFormatConfig, CsvDateFormat, DEFAULT_CSV_FORMAT } from "../utils/csvFormats";
+import { CsvFormatConfig, CsvDateFormat, DEFAULT_CSV_FORMAT, REQUIRED_CSV_COLUMNS } from "../utils/csvFormats";
 import { fetchDbPathConfig, saveDbPathConfig } from "../newApi";
 
 interface CsvFormatsSettingsPageProps {
@@ -8,18 +8,21 @@ interface CsvFormatsSettingsPageProps {
   onBack: () => void;
 }
 
+const REQUIRED_COLUMN_SET = new Set<string>(REQUIRED_CSV_COLUMNS);
 const columnFields: Array<{ key: keyof CsvFormatConfig["columns"]; label: string; required?: boolean }> = [
-  { key: "numeroCompte", label: "Numéro compte", required: true },
+  { key: "numeroCompte", label: "Numéro compte" },
   { key: "numeroAcces", label: "Numéro accès" },
-  { key: "numeroFacture", label: "Numéro facture", required: true },
-  { key: "date", label: "Date (colonne)", required: true },
-  { key: "montantHT", label: "Montant HT", required: true },
+  { key: "numeroFacture", label: "Numéro facture" },
+  { key: "date", label: "Date (colonne)" },
+  { key: "montantHT", label: "Montant HT" },
   { key: "typeAcces", label: "Type d'accès" },
   { key: "libelleDetail", label: "Libellé ligne facture" },
   { key: "rubriqueFacture", label: "Rubrique facture" },
   { key: "niveauCharge", label: "Niveau de charge" },
   { key: "typeCharge", label: "Type de charge" },
-];
+  { key: "nomLigne", label: "Nom de la ligne" },
+  { key: "sousCompte", label: "Numéro de sous-compte" },
+].map((field) => ({ ...field, required: REQUIRED_COLUMN_SET.has(field.key) }));
 
 function slugify(value: string): string {
   return (
@@ -43,6 +46,8 @@ function buildEmptyColumns() {
     rubriqueFacture: "",
     niveauCharge: "",
     typeCharge: "",
+    nomLigne: "",
+    sousCompte: "",
   };
 }
 
@@ -60,6 +65,10 @@ export default function CsvFormatsSettingsPage({ formats, onSaveFormat, onBack }
   const [dbPathLoading, setDbPathLoading] = useState<boolean>(false);
   const [dbPathError, setDbPathError] = useState<string | null>(null);
   const [dbPathSuccess, setDbPathSuccess] = useState<string | null>(null);
+  const [editingFormatId, setEditingFormatId] = useState<string | null>(null);
+  const requiredLabels = useMemo(() => columnFields.filter((field) => field.required).map((field) => field.label), []);
+  const optionalLabels = useMemo(() => columnFields.filter((field) => !field.required).map((field) => field.label), []);
+  const editingFormat = useMemo(() => formats.find((f) => f.id === editingFormatId) || null, [formats, editingFormatId]);
 
   const formatsToDisplay = useMemo(() => {
     const unique = new Map<string, CsvFormatConfig>();
@@ -72,6 +81,15 @@ export default function CsvFormatsSettingsPage({ formats, onSaveFormat, onBack }
 
   function handleChange(key: keyof CsvFormatConfig["columns"], value: string) {
     setColumns((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function handleEditFormat(format: CsvFormatConfig) {
+    setEditingFormatId(format.id);
+    setName(format.name);
+    setDateFormat(format.dateFormat || "DD/MM/YYYY");
+    setColumns({ ...buildEmptyColumns(), ...format.columns });
+    setError(null);
+    setSuccess(null);
   }
 
   function handleSubmit(event: FormEvent) {
@@ -93,7 +111,7 @@ export default function CsvFormatsSettingsPage({ formats, onSaveFormat, onBack }
     }
 
     const newFormat: CsvFormatConfig = {
-      id: slugify(trimmedName),
+      id: editingFormatId || slugify(trimmedName),
       name: trimmedName,
       dateFormat,
       columns: {
@@ -102,7 +120,8 @@ export default function CsvFormatsSettingsPage({ formats, onSaveFormat, onBack }
     };
 
     onSaveFormat(newFormat);
-    setSuccess("Format enregistré. Il sera proposé lors du prochain import.");
+    setSuccess(editingFormatId ? "Format mis à jour." : "Format enregistré. Il sera proposé lors du prochain import.");
+    setEditingFormatId(null);
     setName("");
     setColumns(buildEmptyColumns());
   }
@@ -229,12 +248,46 @@ export default function CsvFormatsSettingsPage({ formats, onSaveFormat, onBack }
             <p style={{ color: "#4b5563", marginTop: 0 }}>
               Les formats sont stockés localement dans votre navigateur. Ajoutez un format pour adapter les titres et l'ordre des colonnes sans changer l'import.
             </p>
+            <div
+              className="alert info"
+              style={{ marginBottom: "1rem", border: "1px solid #bfdbfe", background: "#eff6ff", color: "#1d4ed8" }}
+            >
+              <div style={{ fontWeight: 600 }}>Colonnes nécessaires (utilisées par l'algorithme) : {requiredLabels.join(", ")}.</div>
+              <div style={{ marginTop: "0.35rem", color: "#1f2937" }}>
+                Les autres colonnes sont facultatives mais améliorent la catégorisation et le rattachement des lignes : {optionalLabels.join(", ")}.
+              </div>
+            </div>
 
             {error && <div className="alert error" style={{ marginBottom: "1rem" }}>{error}</div>}
             {success && <div className="alert success" style={{ marginBottom: "1rem" }}>{success}</div>}
 
             <form onSubmit={handleSubmit} className="card" style={{ marginBottom: "1.5rem" }}>
-              <h2>Ajouter un format</h2>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem" }}>
+                <h2 style={{ margin: 0 }}>{editingFormat ? "Modifier un format" : "Ajouter un format"}</h2>
+                <div style={{ display: "flex", gap: "0.5rem" }}>
+                  {editingFormat && (
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => {
+                        setEditingFormatId(null);
+                        setName("");
+                        setColumns(buildEmptyColumns());
+                        setDateFormat("DD/MM/YYYY");
+                        setSuccess(null);
+                        setError(null);
+                      }}
+                    >
+                      Nouveau format
+                    </button>
+                  )}
+                </div>
+              </div>
+              {editingFormat && (
+                <div style={{ marginTop: "0.35rem", color: "#4b5563" }}>
+                  Édition du format <strong>{editingFormat.name}</strong> (id: {editingFormat.id}). L'identifiant reste inchangé pour éviter de casser les imports existants.
+                </div>
+              )}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
                 <div style={{ gridColumn: "1 / span 2" }}>
                   <label style={{ display: "block", marginBottom: "0.25rem" }}>Nom du format</label>
@@ -275,7 +328,7 @@ export default function CsvFormatsSettingsPage({ formats, onSaveFormat, onBack }
                   Réinitialiser
                 </button>
                 <button type="submit" className="upload-button" style={{ padding: "0.5rem 1rem" }}>
-                  Enregistrer le format
+                  {editingFormat ? "Mettre à jour le format" : "Enregistrer le format"}
                 </button>
               </div>
             </form>
@@ -288,13 +341,18 @@ export default function CsvFormatsSettingsPage({ formats, onSaveFormat, onBack }
               <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
                 {formatsToDisplay.map((format) => (
                   <div key={format.id} style={{ border: "1px solid #e5e7eb", borderRadius: "0.5rem", padding: "0.75rem" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem" }}>
+                      <div style={{ minWidth: 0 }}>
                         <strong>{format.name}</strong>
                         <div style={{ color: "#6b7280", fontSize: "0.85rem" }}>Identifiant: {format.id}</div>
                         <div style={{ color: "#6b7280", fontSize: "0.85rem" }}>Date: {format.dateFormat || "DD/MM/YYYY"}</div>
                       </div>
-                      <span style={{ fontSize: "0.85rem", color: "#6b7280" }}>{Object.values(format.columns).filter(Boolean).join(", ")}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                        <span style={{ fontSize: "0.85rem", color: "#6b7280" }}>{Object.values(format.columns).filter(Boolean).join(", ")}</span>
+                        <button type="button" className="secondary-button" onClick={() => handleEditFormat(format)}>
+                          Modifier
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}

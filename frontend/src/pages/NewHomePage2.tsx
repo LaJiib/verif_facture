@@ -7,9 +7,12 @@ import {
   API_BASE_URL,
   type UploadMeta,
   fetchEntrepriseDashboard,
+  fetchLignesParType,
+  type LignesParTypeResponse,
 } from "../newApi";
 import { decodeFactureStatus, decodeLineType } from "../utils/codecs";
 import { StatusBar } from "../utils/statusBar";
+import LigneInsightModal from "../components/LigneInsightModal";
 import { computeVariation } from "../utils/variation";
 
 interface HomePageProps {
@@ -17,6 +20,7 @@ interface HomePageProps {
   entrepriseNom: string;
   onNavigateToFactures: () => void;
   onNavigateToImport: () => void;
+  onNavigateToAbonnements: () => void;
   onReloadEntreprises: () => void;
 }
 
@@ -47,6 +51,7 @@ export default function HomePage({
   entrepriseNom,
   onNavigateToFactures,
   onNavigateToImport,
+  onNavigateToAbonnements,
   onReloadEntreprises,
 }: HomePageProps) {
   const [stats, setStats] = useState<BaseStats | null>(null);
@@ -62,6 +67,13 @@ export default function HomePage({
   const [uploadsError, setUploadsError] = useState<string | null>(null);
   const [expandedMonth, setExpandedMonth] = useState<string | null>(null);
   const [selectedUpload, setSelectedUpload] = useState<UploadMeta | null>(null);
+  const [drillType, setDrillType] = useState<number | null>(null);
+  const [drillData, setDrillData] = useState<LignesParTypeResponse | null>(null);
+  const [drillLoading, setDrillLoading] = useState(false);
+  const [drillError, setDrillError] = useState<string | null>(null);
+  const [expandedLot, setExpandedLot] = useState<string | null>(null);
+  const [expandedCompteId, setExpandedCompteId] = useState<number | null>(null);
+  const [ligneModalId, setLigneModalId] = useState<number | null>(null);
 
   useEffect(() => {
     loadStats();
@@ -331,6 +343,16 @@ export default function HomePage({
             </div>
           </div>
 
+          <div
+            style={{ background: "white", borderRadius: "0.5rem", padding: "1.5rem", boxShadow: "0 1px 3px rgba(0,0,0,0.1)", cursor: "pointer" }}
+            onClick={onNavigateToAbonnements}
+            title="Répartition des abonnements sur le dernier mois"
+          >
+            <div style={{ color: "#6b7280", fontSize: "0.875rem", marginBottom: "0.5rem" }}>Abonnements</div>
+            <div style={{ fontSize: "1.5rem", fontWeight: "bold", color: "#1f2937" }}>Voir la répartition</div>
+            <div style={{ color: "#6b7280", fontSize: "0.9rem", marginTop: "0.4rem" }}>Cliquez pour visualiser</div>
+          </div>
+
           <div style={{ background: "white", borderRadius: "0.5rem", padding: "1.5rem", boxShadow: "0 1px 3px rgba(0,0,0,0.1)", gridColumn: "span 2" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
@@ -362,7 +384,12 @@ export default function HomePage({
               paddingTop: "10vh",
               zIndex: 1000,
             }}
-            onClick={() => setShowLignesParType(false)}
+            onClick={() => {
+              setShowLignesParType(false);
+              setDrillType(null);
+              setDrillData(null);
+              setDrillError(null);
+            }}
           >
             <div
               style={{
@@ -370,15 +397,22 @@ export default function HomePage({
                 borderRadius: "0.75rem",
                 padding: "1.5rem",
                 width: "90%",
-                maxWidth: "720px",
+                maxWidth: "900px",
                 boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
+                maxHeight: "80vh",
+                overflowY: "auto",
               }}
               onClick={(e) => e.stopPropagation()}
             >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
                 <h2 style={{ fontSize: "1.25rem", fontWeight: "600", margin: 0 }}>Lignes par type</h2>
                 <button
-                  onClick={() => setShowLignesParType(false)}
+                  onClick={() => {
+                    setShowLignesParType(false);
+                    setDrillType(null);
+                    setDrillData(null);
+                    setDrillError(null);
+                  }}
                   style={{ border: "none", background: "transparent", fontSize: "1.2rem", cursor: "pointer", color: "#6b7280" }}
                   aria-label="Fermer"
                 >
@@ -391,11 +425,112 @@ export default function HomePage({
               ) : (
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "0.75rem" }}>
                   {lignesParType.map((row, idx) => (
-                    <div key={idx} style={{ border: "1px solid #e5e7eb", borderRadius: "0.5rem", padding: "0.9rem", background: "#f9fafb" }}>
+                    <div
+                      key={idx}
+                      style={{ border: "1px solid #e5e7eb", borderRadius: "0.5rem", padding: "0.9rem", background: "#f9fafb", cursor: "pointer" }}
+                      onClick={async () => {
+                        setDrillType(row.type);
+                        setDrillLoading(true);
+                        setDrillError(null);
+                        setExpandedLot(null);
+                        setExpandedCompteId(null);
+                        try {
+                          const res = await fetchLignesParType(entrepriseId, row.type);
+                          setDrillData(res);
+                        } catch (err) {
+                          setDrillError((err as Error).message);
+                        } finally {
+                          setDrillLoading(false);
+                        }
+                      }}
+                    >
                       <div style={{ color: "#6b7280", fontSize: "0.9rem", marginBottom: "0.25rem" }}>{decodeLineType(row.type)}</div>
                       <div style={{ fontWeight: 700, fontSize: "1.1rem", color: "#1f2937" }}>{row.count}</div>
                     </div>
                   ))}
+                </div>
+              )}
+
+              {drillLoading && <p style={{ color: "#6b7280", marginTop: "1rem" }}>Chargement de la répartition...</p>}
+              {drillError && <p style={{ color: "#b91c1c", marginTop: "1rem" }}>{drillError}</p>}
+
+              {drillData && drillType !== null && (
+                <div style={{ marginTop: "1rem" }}>
+                  <h3 style={{ margin: "0 0 0.5rem", fontSize: "1.05rem" }}>
+                    Répartition {decodeLineType(drillType)} par lot
+                  </h3>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                    {drillData.lots.map((lot) => (
+                      <div
+                        key={lot.lot}
+                        style={{
+                          border: "1px solid #e5e7eb",
+                          borderRadius: "0.5rem",
+                          padding: "0.85rem",
+                          background: "#fff",
+                        }}
+                      >
+                        <div
+                          style={{ display: "flex", justifyContent: "space-between", cursor: "pointer" }}
+                          onClick={() => {
+                            setExpandedLot(expandedLot === lot.lot ? null : lot.lot);
+                            setExpandedCompteId(null);
+                          }}
+                        >
+                          <div style={{ fontWeight: 700, color: "#111827" }}>{lot.lot}</div>
+                          <div style={{ color: "#6b7280" }}>{lot.total} ligne(s)</div>
+                        </div>
+                        {expandedLot === lot.lot && (
+                          <div style={{ marginTop: "0.6rem", display: "flex", flexDirection: "column", gap: "0.45rem" }}>
+                            {lot.comptes.map((c) => (
+                              <div
+                                key={c.compte_id}
+                                style={{
+                                  border: "1px solid #e5e7eb",
+                                  borderRadius: "0.4rem",
+                                  padding: "0.6rem",
+                                  background: "#f9fafb",
+                                  cursor: "pointer",
+                                }}
+                                onClick={() => setExpandedCompteId(expandedCompteId === c.compte_id ? null : c.compte_id)}
+                              >
+                                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                                  <div>
+                                    <div style={{ fontWeight: 700, color: "#111827" }}>
+                                      Compte {c.compte_num} {c.compte_nom ? `- ${c.compte_nom}` : ""}
+                                    </div>
+                                    <div style={{ fontSize: "0.9rem", color: "#6b7280" }}>{c.total} ligne(s)</div>
+                                  </div>
+                                </div>
+                                {expandedCompteId === c.compte_id && (
+                                  <div style={{ marginTop: "0.5rem", display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+                                    {c.lignes.map((l) => (
+                                      <div
+                                        key={l.id}
+                                        style={{
+                                          border: "1px solid #e5e7eb",
+                                          borderRadius: "0.35rem",
+                                          padding: "0.45rem",
+                                          background: "#fff",
+                                          cursor: "pointer",
+                                        }}
+                                        onClick={() => setLigneModalId(l.id)}
+                                      >
+                                        <div style={{ fontWeight: 600, color: "#111827" }}>{l.num}</div>
+                                        <div style={{ fontSize: "0.9rem", color: "#6b7280" }}>
+                                          {l.nom || "Sans nom"} {l.sous_compte ? `• Sous-compte: ${l.sous_compte}` : ""}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -698,6 +833,8 @@ export default function HomePage({
         </div>
 
         {/* Gestion de la base de donnees */}
+
+        {ligneModalId !== null && <LigneInsightModal ligneId={ligneModalId} onClose={() => setLigneModalId(null)} />}
         <div
           style={{
             background: "white",

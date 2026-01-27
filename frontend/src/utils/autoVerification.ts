@@ -36,6 +36,18 @@ function coerceStatut(value: string | undefined): StatutValeur {
   return "a_verifier";
 }
 
+function coerceAnomalie(anomalie: any): LigneAnomalie {
+  return {
+    kind: anomalie.kind as "added" | "removed" | "net_change", // Cast to union type; add validation if needed
+    line: anomalie.line,
+    detail: anomalie.detail,
+    prev_net: anomalie.prev_net,
+    curr_net: anomalie.curr_net,
+    prev_achat: anomalie.prev_achat,
+    curr_achat: anomalie.curr_achat,
+  };
+}
+
 function mapResult(res: AutoVerifFullResult): AutoVerificationResult {
   const metricStatuts: AutoVerificationResult["metricStatuts"] = {
     aboNet: coerceStatut(res.metricStatuts?.aboNet),
@@ -47,13 +59,17 @@ function mapResult(res: AutoVerifFullResult): AutoVerificationResult {
   Object.entries(res.groupStatuts || {}).forEach(([key, val]) => {
     groupStatuts[key] = { aboNet: coerceStatut(val.aboNet), achat: coerceStatut(val.achat) };
   });
+  const groupAnomalies: AutoVerificationResult["groupAnomalies"] = {};
+  Object.entries(res.groupAnomalies || {}).forEach(([key, anomalies]) => {
+    groupAnomalies[key] = (anomalies as any[]).map(coerceAnomalie);
+  });
   return {
     metricStatuts,
     metricComments: res.metricComments || {},
     metricReals: res.metricReals || {},
     groupStatuts,
     groupComments: res.groupComments || {},
-    groupAnomalies: res.groupAnomalies || {},
+    groupAnomalies,
     summary: res.summary as AutoVerificationResult["summary"],
   };
 }

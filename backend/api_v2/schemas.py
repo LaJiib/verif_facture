@@ -42,6 +42,8 @@ class LigneBase(BaseModel):
     num: str
     type: int = Field(0, ge=0)
     compte_id: int
+    nom: Optional[str] = None
+    sous_compte: Optional[str] = None
 
 
 class LigneOut(LigneBase):
@@ -93,6 +95,7 @@ class AbonnementBase(BaseModel):
     nom: str
     prix: float = 0
     commentaire: Optional[str] = None
+    entreprise_id: Optional[int] = None
 
 
 class AbonnementOut(AbonnementBase):
@@ -107,6 +110,8 @@ class AbonnementAttachPayload(BaseModel):
     abonnement_id: Optional[int] = None
     nom: Optional[str] = None
     prix: Optional[float] = None
+    commentaire: Optional[str] = None
+    entreprise_id: Optional[int] = None
     date: Optional[date] = None
 
 
@@ -167,6 +172,58 @@ class DashboardResponse(BaseModel):
     prev_month: Optional[DashboardMonth] = None
 
 
+class AbonnementUsage(BaseModel):
+    id: int
+    nom: str
+    prix: float
+    commentaire: Optional[str] = None
+    nb_lignes: int = 0
+    nb_factures: int = 0
+    total_ht: float = 0
+
+
+class AbonnementStatsResponse(BaseModel):
+    mois: str
+    abonnements: List[AbonnementUsage]
+    lignes_sans_abonnement: int = 0
+
+
+class LignesParTypeLot(BaseModel):
+    lot: str
+    total: int
+    comptes: List[Dict[str, Any]]
+
+
+class LignesParTypeResponse(BaseModel):
+    type: int
+    lots: List[LignesParTypeLot]
+
+
+class LigneTimelineFacture(BaseModel):
+    facture_id: int
+    facture_num: str
+    date: str
+    statut: int
+    abo: float
+    conso: float
+    remises: float
+    achat: float
+    total_ht: float
+    ligne_facture_id: int
+    ligne_statut: int
+
+
+class LigneAbonnementHistory(BaseModel):
+    abonnement_id: int
+    nom: str
+    prix: float
+    date: Optional[str] = None
+
+
+class LigneTimelineResponse(BaseModel):
+    ligne: Dict[str, Any]
+    factures: List[LigneTimelineFacture]
+    abonnements: List[LigneAbonnementHistory]
 class MatriceFactureItem(BaseModel):
     facture_id: int
     facture_num: str
@@ -205,7 +262,9 @@ class FactureDetailLine(BaseModel):
     ligne_facture_id: int
     ligne_id: int
     ligne_num: str
+    nom: Optional[str] = None
     ligne_type: int
+    sous_compte: Optional[str] = None
     abo: float
     conso: float
     remises: float
@@ -238,6 +297,8 @@ class LigneGroupe(BaseModel):
     conso: float
     achat: float
     total: float
+    ligne_ids: Optional[List[int]] = None
+    ligne_facture_ids: Optional[List[int]] = None
 
 
 class FactureResume(BaseModel):

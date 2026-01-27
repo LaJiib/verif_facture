@@ -35,6 +35,7 @@ class Entreprise(Base):
     nom = Column(String, nullable=False, unique=True)
 
     comptes = relationship("Compte", back_populates="entreprise", cascade="all, delete-orphan")
+    abonnements = relationship("Abonnement", back_populates="entreprise", cascade="all, delete-orphan")
 
 
 class Compte(Base):
@@ -59,26 +60,54 @@ class Ligne(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     num = Column(String, nullable=False)
     type = Column(Integer, nullable=False, default=0)  # 0=Fixe,1=Mobile,2=Internet,3=Autre
+    nom = Column(String, nullable=True)
+    sous_compte = Column(String, nullable=True)
     compte_id = Column(Integer, ForeignKey("comptes.id", ondelete="CASCADE"), nullable=False)
 
     __table_args__ = (UniqueConstraint("num", "compte_id", name="uix_ligne_num_compte"),)
 
     compte = relationship("Compte", back_populates="lignes")
     ligne_factures = relationship("LigneFacture", back_populates="ligne", cascade="all, delete-orphan")
-    ligne_abonnements = relationship("LigneAbonnement", back_populates="ligne", cascade="all, delete-orphan")
-    abonnements = relationship("Abonnement", secondary="lignes_abonnements", back_populates="lignes")
+    ligne_abonnements = relationship(
+        "LigneAbonnement",
+        back_populates="ligne",
+        cascade="all, delete-orphan",
+        overlaps="abonnements,lignes"
+    )
+    abonnements = relationship(
+        "Abonnement",
+        secondary="lignes_abonnements",
+        back_populates="lignes",
+        overlaps="ligne_abonnements,lignes"
+    )
 
 
 class Abonnement(Base):
     __tablename__ = "abonnements"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    nom = Column(String, nullable=False, unique=True)
+    nom = Column(String, nullable=False)
     prix = Column(Numeric(10, 2), nullable=False, default=0)
     commentaire = Column(Text, nullable=True)
+    entreprise_id = Column(Integer, ForeignKey("entreprises.id", ondelete="CASCADE"), nullable=True)
 
-    lignes = relationship("Ligne", secondary="lignes_abonnements", back_populates="abonnements")
-    ligne_abonnements = relationship("LigneAbonnement", back_populates="abonnement", cascade="all, delete-orphan")
+    entreprise = relationship("Entreprise", back_populates="abonnements")
+    lignes = relationship(
+        "Ligne",
+        secondary="lignes_abonnements",
+        back_populates="abonnements",
+        overlaps="ligne_abonnements,abonnements"
+    )
+    ligne_abonnements = relationship(
+        "LigneAbonnement",
+        back_populates="abonnement",
+        cascade="all, delete-orphan",
+        overlaps="lignes,abonnements"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("nom", "entreprise_id", name="uix_abonnement_nom_entreprise"),
+    )
 
 
 class LigneAbonnement(Base):
@@ -91,8 +120,16 @@ class LigneAbonnement(Base):
 
     __table_args__ = (UniqueConstraint("abonnement_id", "ligne_id", "date", name="uix_ligne_abonnement"),)
 
-    abonnement = relationship("Abonnement", back_populates="ligne_abonnements")
-    ligne = relationship("Ligne", back_populates="ligne_abonnements")
+    abonnement = relationship(
+        "Abonnement",
+        back_populates="ligne_abonnements",
+        overlaps="lignes,abonnements,ligne_abonnements"
+    )
+    ligne = relationship(
+        "Ligne",
+        back_populates="ligne_abonnements",
+        overlaps="lignes,abonnements,ligne_abonnements"
+    )
 
 
 class Facture(Base):

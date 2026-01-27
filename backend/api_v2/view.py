@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from typing import Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,6 +20,7 @@ from ..models import (
     LigneFacture,
     Abonnement,
     LigneAbonnement,
+    FactureReport,
 )
 from ..storage import list_uploads
 from .schemas import (
@@ -35,6 +36,12 @@ from .schemas import (
     FactureOut,
     CompteOut,
     FactureDetailStats,
+    AbonnementStatsResponse,
+    AbonnementUsage,
+    LignesParTypeResponse,
+    LigneTimelineResponse,
+    LigneTimelineFacture,
+    LigneAbonnementHistory,
 )
 
 router = APIRouter(prefix="/v2/view", tags=["view"])
@@ -46,6 +53,15 @@ def _get_entreprise_or_404(entreprise_id: int, db: Session) -> Entreprise:
     if not ent:
         raise HTTPException(status_code=404, detail="Entreprise introuvable")
     return ent
+
+
+def _month_bounds(d: date) -> tuple[date, date]:
+    start = d.replace(day=1)
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1, day=1)
+    else:
+        end = start.replace(month=start.month + 1, day=1)
+    return start, end
 
 
 @router.get("/entreprises/{entreprise_id}/dashboard", response_model=DashboardResponse)
@@ -233,6 +249,225 @@ def entreprise_matrice(entreprise_id: int, db: Session = Depends(get_db)):
     return response
 
 
+@router.get("/entreprises/{entreprise_id}/abonnements-stats", response_model=AbonnementStatsResponse)
+def entreprise_abonnements_stats(entreprise_id: int, db: Session = Depends(get_db)):
+    """Statistiques d'usage des abonnements pour le dernier mois disponible."""
+    ent = _get_entreprise_or_404(entreprise_id, db)
+
+    last_facture_date = (
+        db.query(func.max(Facture.date))
+        .join(Compte, Facture.compte_id == Compte.id)
+        .filter(Compte.entreprise_id == entreprise_id)
+        .scalar()
+    )
+    if not last_facture_date:
+        return AbonnementStatsResponse(mois="", abonnements=[], lignes_sans_abonnement=0)
+
+    start, end = _month_bounds(last_facture_date)
+    mois_key = start.strftime("%Y-%m")
+
+    abo_rows = (
+        db.query(
+            Abonnement.id,
+            Abonnement.nom,
+            Abonnement.prix,
+            Abonnement.commentaire,
+            func.count(func.distinct(Ligne.id)).label("nb_lignes"),
+            func.count(func.distinct(Facture.id)).label("nb_factures"),
+            func.sum(LigneFacture.abo + LigneFacture.remises + LigneFacture.conso + LigneFacture.achat).label("total_ht"),
+        )
+        .join(LigneAbonnement, LigneAbonnement.abonnement_id == Abonnement.id)
+        .join(Ligne, Ligne.id == LigneAbonnement.ligne_id)
+        .join(Compte, Compte.id == Ligne.compte_id)
+        .join(LigneFacture, LigneFacture.ligne_id == Ligne.id)
+        .join(Facture, Facture.id == LigneFacture.facture_id)
+        .filter(
+            Compte.entreprise_id == entreprise_id,
+            Abonnement.entreprise_id == entreprise_id,
+            Facture.date >= start,
+            Facture.date < end,
+        )
+        .group_by(Abonnement.id)
+        .order_by(Abonnement.nom)
+        .all()
+    )
+
+    ligne_ids_with_abo = (
+        db.query(func.distinct(Ligne.id))
+        .join(LigneFacture, LigneFacture.ligne_id == Ligne.id)
+        .join(Facture, Facture.id == LigneFacture.facture_id)
+        .join(Compte, Compte.id == Ligne.compte_id)
+        .outerjoin(LigneAbonnement, LigneAbonnement.ligne_id == Ligne.id)
+        .filter(
+            Compte.entreprise_id == entreprise_id,
+            Facture.date >= start,
+            Facture.date < end,
+            LigneAbonnement.abonnement_id.isnot(None),
+        )
+        .all()
+    )
+    ligne_ids_with_abo_set = {r[0] for r in ligne_ids_with_abo}
+
+    total_lignes_month = (
+        db.query(func.count(func.distinct(Ligne.id)))
+        .join(LigneFacture, LigneFacture.ligne_id == Ligne.id)
+        .join(Facture, Facture.id == LigneFacture.facture_id)
+        .join(Compte, Compte.id == Ligne.compte_id)
+        .filter(Compte.entreprise_id == entreprise_id, Facture.date >= start, Facture.date < end)
+        .scalar()
+        or 0
+    )
+    lignes_sans_abonnement = max(0, total_lignes_month - len(ligne_ids_with_abo_set))
+
+    abonnements = [
+        AbonnementUsage(
+            id=row.id,
+            nom=row.nom,
+            prix=float(row.prix or 0),
+            commentaire=row.commentaire,
+            nb_lignes=int(row.nb_lignes or 0),
+            nb_factures=int(row.nb_factures or 0),
+            total_ht=float(row.total_ht or 0),
+        )
+        for row in abo_rows
+    ]
+
+    logger.info(
+        "Abonnements stats entreprise_id=%s mois=%s abos=%s lignes_sans_abo=%s",
+        ent.id,
+        mois_key,
+        len(abonnements),
+        lignes_sans_abonnement,
+    )
+
+    return AbonnementStatsResponse(mois=mois_key, abonnements=abonnements, lignes_sans_abonnement=lignes_sans_abonnement)
+
+
+@router.get("/entreprises/{entreprise_id}/lignes-par-type", response_model=LignesParTypeResponse)
+def entreprise_lignes_par_type(entreprise_id: int, type_code: int, db: Session = Depends(get_db)):
+    """Répartition des lignes d'un type donné par lot puis par compte."""
+    _get_entreprise_or_404(entreprise_id, db)
+
+    comptes = (
+        db.query(Compte.id, Compte.num, Compte.nom, Compte.lot)
+        .filter(Compte.entreprise_id == entreprise_id)
+        .all()
+    )
+    comptes_map = {c.id: {"id": c.id, "num": c.num, "nom": c.nom, "lot": c.lot or "Sans lot"} for c in comptes}
+
+    lignes = (
+        db.query(Ligne.id, Ligne.num, Ligne.nom, Ligne.sous_compte, Ligne.compte_id)
+        .join(Compte, Compte.id == Ligne.compte_id)
+        .filter(Compte.entreprise_id == entreprise_id, Ligne.type == type_code)
+        .order_by(Compte.lot, Compte.num, Ligne.num)
+        .all()
+    )
+
+    lots_map: Dict[str, Dict] = {}
+    for l in lignes:
+        compte = comptes_map.get(l.compte_id)
+        if not compte:
+            continue
+        lot_key = compte["lot"] or "Sans lot"
+        if lot_key not in lots_map:
+            lots_map[lot_key] = {"lot": lot_key, "total": 0, "comptes": {}}
+        lot_entry = lots_map[lot_key]
+        compte_entry = lot_entry["comptes"].get(compte["id"])
+        if not compte_entry:
+            compte_entry = {
+                "compte_id": compte["id"],
+                "compte_num": compte["num"],
+                "compte_nom": compte["nom"],
+                "total": 0,
+                "lignes": [],
+            }
+            lot_entry["comptes"][compte["id"]] = compte_entry
+        compte_entry["lignes"].append(
+            {
+                "id": l.id,
+                "num": l.num,
+                "nom": l.nom,
+                "sous_compte": l.sous_compte,
+            }
+        )
+        compte_entry["total"] += 1
+        lot_entry["total"] += 1
+
+    lots = []
+    for lot_key, lot_val in lots_map.items():
+        comptes_list = list(lot_val["comptes"].values())
+        comptes_list.sort(key=lambda c: c["compte_num"])
+        lots.append({"lot": lot_key, "total": lot_val["total"], "comptes": comptes_list})
+
+    lots.sort(key=lambda l: l["lot"])
+    return LignesParTypeResponse(type=type_code, lots=lots)
+
+
+@router.get("/lignes/{ligne_id}/timeline", response_model=LigneTimelineResponse)
+def ligne_timeline(ligne_id: int, db: Session = Depends(get_db)):
+    ligne = db.query(Ligne).filter(Ligne.id == ligne_id).first()
+    if not ligne:
+        raise HTTPException(status_code=404, detail="Ligne introuvable")
+    compte = db.query(Compte).filter(Compte.id == ligne.compte_id).first()
+    if not compte:
+        raise HTTPException(status_code=404, detail="Compte introuvable")
+
+    lf_rows = (
+        db.query(LigneFacture, Facture)
+        .join(Facture, Facture.id == LigneFacture.facture_id)
+        .filter(LigneFacture.ligne_id == ligne_id)
+        .order_by(Facture.date)
+        .all()
+    )
+    factures = [
+        LigneTimelineFacture(
+          facture_id=f.id,
+          facture_num=f.num,
+          date=f.date.isoformat(),
+          statut=f.statut,
+          abo=float(lf.abo),
+          conso=float(lf.conso),
+          remises=float(lf.remises),
+          achat=float(lf.achat),
+          total_ht=lf.total_ht,
+          ligne_facture_id=lf.id,
+          ligne_statut=lf.statut,
+        )
+        for lf, f in lf_rows
+    ]
+
+    ab_rows = (
+        db.query(LigneAbonnement, Abonnement)
+        .join(Abonnement, Abonnement.id == LigneAbonnement.abonnement_id)
+        .filter(LigneAbonnement.ligne_id == ligne_id)
+        .order_by(LigneAbonnement.date.desc().nulls_last())
+        .all()
+    )
+    abonnements = [
+        LigneAbonnementHistory(
+            abonnement_id=ab.id,
+            nom=ab.nom,
+            prix=float(ab.prix),
+            date=la.date.isoformat() if la.date else None,
+        )
+        for la, ab in ab_rows
+    ]
+
+    ligne_data = {
+        "id": ligne.id,
+        "num": ligne.num,
+        "type": ligne.type,
+        "nom": ligne.nom,
+        "sous_compte": ligne.sous_compte,
+        "compte_id": compte.id,
+        "compte_num": compte.num,
+        "compte_nom": compte.nom,
+        "lot": compte.lot,
+    }
+
+    return LigneTimelineResponse(ligne=ligne_data, factures=factures, abonnements=abonnements)
+
+
 @router.get("/factures/{facture_id}/detail", response_model=FactureDetail)
 def facture_detail(facture_id: int, db: Session = Depends(get_db)):
     facture = db.query(Facture).filter(Facture.id == facture_id).first()
@@ -262,7 +497,9 @@ def facture_detail(facture_id: int, db: Session = Depends(get_db)):
             ligne_facture_id=lf.id,
             ligne_id=ligne.id,
             ligne_num=ligne.num,
+            nom=ligne.nom,
             ligne_type=ligne.type,
+            sous_compte=ligne.sous_compte,
             abo=float(lf.abo),
             conso=float(lf.conso),
             remises=float(lf.remises),
@@ -325,20 +562,21 @@ def facture_detail_stats(facture_id: int, db: Session = Depends(get_db)):
     facture = db.query(Facture).filter(Facture.id == facture_id).first()
     if not facture:
         raise HTTPException(status_code=404, detail="Facture introuvable")
-    # Groupes de lignes (abonnement si present, sinon type + net unitaire)
+    # Groupes de lignes par caractÈristiques principales (type + abo ref + net unitaire arrondi au centime)
+    def _group_key(lf: FactureDetailLine) -> str:
+        net_unit = round(lf.abo + lf.remises, 2)
+        abo_part = f"abo:{lf.abo_id_ref}" if lf.abo_id_ref else "noabo"
+        return f"type:{lf.ligne_type}|{abo_part}|net:{net_unit:.2f}"
+
     groupes_map: Dict[str, Dict[str, float | int | str | None]] = {}
     for lf in base_detail.lignes:
         net_unit = round(lf.abo + lf.remises, 2)
-        group_type = lf.ligne_type
-        if lf.abo_id_ref:
-            key = f"abo|{lf.abo_id_ref}|{group_type}|{net_unit}"
-        else:
-            key = f"price|{group_type}|{net_unit}"
+        key = _group_key(lf)
         if key not in groupes_map:
             groupes_map[key] = {
                 "facture_id": facture_id,
                 "group_key": key,
-                "ligne_type": group_type,
+                "ligne_type": lf.ligne_type,
                 "abo_id_ref": lf.abo_id_ref,
                 "abo_nom_ref": lf.abo_nom_ref,
                 "prix_abo": float(lf.abo_prix_ref or net_unit),
@@ -349,6 +587,8 @@ def facture_detail_stats(facture_id: int, db: Session = Depends(get_db)):
                 "conso": 0.0,
                 "achat": 0.0,
                 "total": 0.0,
+                "ligne_ids": [],
+                "ligne_facture_ids": [],
             }
         g = groupes_map[key]
         g["count"] = int(g["count"]) + 1  # type: ignore
@@ -358,6 +598,8 @@ def facture_detail_stats(facture_id: int, db: Session = Depends(get_db)):
         g["conso"] = float(g["conso"]) + lf.conso  # type: ignore
         g["achat"] = float(g["achat"]) + lf.achat  # type: ignore
         g["total"] = float(g["total"]) + lf.total_ht  # type: ignore
+        g["ligne_ids"].append(lf.ligne_id)  # type: ignore
+        g["ligne_facture_ids"].append(lf.ligne_facture_id)  # type: ignore
     ligne_groupes = list(groupes_map.values())
     # Stats globales pour ce compte/mois
     stats_row = (
@@ -442,6 +684,8 @@ def facture_detail_stats(facture_id: int, db: Session = Depends(get_db)):
             "abo_id_ref": lf.abo_id_ref,
             "abo_nom_ref": lf.abo_nom_ref,
             "abo_prix_ref": lf.abo_prix_ref,
+            "sous_compte": getattr(lf, "sous_compte", None),
+            "nom": getattr(lf, "nom", None),
         }
 
     # Resume facture (totaux lignes vs facture)

@@ -139,13 +139,23 @@ export default function EntreprisePage({
   const [collapsedLots, setCollapsedLots] = useState<Set<string>>(new Set());
   const [collapsedMonths, setCollapsedMonths] = useState<Set<string>>(new Set());
   const firstLoadRef = useRef(true);
+  const refreshTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     loadData();
+    if (refreshTimerRef.current) {
+      clearInterval(refreshTimerRef.current);
+    }
+    refreshTimerRef.current = window.setInterval(() => loadData(true, true, true), 10000);
+    return () => {
+      if (refreshTimerRef.current) {
+        clearInterval(refreshTimerRef.current);
+      }
+    };
   }, [entrepriseId]);
 
-  async function loadData(preserveSelection: boolean = true) {
-    setIsLoading(true);
+  async function loadData(preserveSelection: boolean = true, silent: boolean = false, preserveCollapsed: boolean = true) {
+    if (!silent) setIsLoading(true);
     setError(null);
 
     try {
@@ -224,6 +234,9 @@ export default function EntreprisePage({
         setCollapsedLots(new Set(lotsForTree.map((l) => l.lot)));
         setCollapsedMonths(new Set(moisList.map((m) => m.date_key)));
         firstLoadRef.current = false;
+      } else if (!preserveCollapsed) {
+        setCollapsedLots(new Set(lotsForTree.map((l) => l.lot)));
+        setCollapsedMonths(new Set(moisList.map((m) => m.date_key)));
       }
 
       if (!preserveSelection) {
@@ -237,7 +250,7 @@ export default function EntreprisePage({
     } catch (err) {
       setError((err as Error).message);
     } finally {
-      setIsLoading(false);
+      if (!silent) setIsLoading(false);
     }
   }
 
@@ -321,9 +334,12 @@ export default function EntreprisePage({
           return { ...c, stats: compteStats };
         });
 
-        return { ...lot, stats: lotStats, comptes };
-      })
-    );
+      return { ...lot, stats: lotStats, comptes };
+    })
+  );
+
+    // Rafraîchit toutes les factures depuis le backend en conservant l'état d'ouverture
+    loadData(true, true, true);
   }
 
   function getCompteMonths(compteId: number): string[] {

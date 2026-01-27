@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { analyzeCSV, importCSV, type ImportResult, type CompteACreer } from "../csvImporter";
 import { CsvFormatConfig, DEFAULT_CSV_FORMAT } from "../utils/csvFormats";
 import CompteConfirmationModal from "../components/CompteConfirmationModal";
+import AbonnementConfirmationModal from "../components/AbonnementConfirmationModal";
 
 interface ImportPageProps {
   entrepriseId: number;
@@ -16,6 +17,15 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const [analyzeAbos, setAnalyzeAbos] = useState<{ enabled: boolean; types: Set<number> }>({
+    enabled: false,
+    types: new Set([0, 1, 2, 3]),
+  });
+  const [abosSuggeres, setAbosSuggeres] = useState<ImportResult["abonnementsSuggeres"]>([]);
+  const [abosSelectionnes, setAbosSelectionnes] = useState<Set<number>>(new Set());
+  const [showAboModal, setShowAboModal] = useState(false);
+  const [pendingComptesSelection, setPendingComptesSelection] = useState<Set<string> | null>(null);
+  const [pendingComptesOverrides, setPendingComptesOverrides] = useState<CompteACreer[] | undefined>(undefined);
 
   // Étape de confirmation des comptes
   const [showCompteModal, setShowCompteModal] = useState(false);
@@ -44,14 +54,31 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
     setIsLoading(true);
     setError(null);
     setImportResult(null);
+    setPendingComptesSelection(null);
+    setPendingComptesOverrides(undefined);
 
     try {
-      const { comptesACreer } = await analyzeCSV(selectedFile, entrepriseId, activeFormat);
+      const { comptesACreer, abonnementsSuggeres } = await analyzeCSV(
+        selectedFile,
+        entrepriseId,
+        activeFormat,
+        analyzeAbos.enabled ? { enabled: true, types: Array.from(analyzeAbos.types) } : undefined
+      );
+
+      const defaultSel = new Set(
+        (abonnementsSuggeres || [])
+          .map((a, idx) => ((a.count_lignes ?? 0) >= 5 ? idx : null))
+          .filter((v): v is number => v !== null)
+      );
+      setAbosSuggeres(abonnementsSuggeres || []);
+      setAbosSelectionnes(defaultSel);
 
       if (comptesACreer.length > 0) {
         // Il y a des comptes à créer, afficher la modale
         setComptesACreer(comptesACreer);
         setShowCompteModal(true);
+      } else if ((abonnementsSuggeres || []).length > 0) {
+        setShowAboModal(true);
       } else {
         // Pas de nouveaux comptes, importer directement
         await proceedWithImport(new Set());
@@ -63,13 +90,45 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
     }
   }
 
+  function handleCompteConfirm(comptesSelectionnes: Set<string>, comptesMisesAJour: CompteACreer[]) {
+    setPendingComptesSelection(comptesSelectionnes);
+    setPendingComptesOverrides(comptesMisesAJour);
+    setShowCompteModal(false);
+    if (abosSuggeres && abosSuggeres.length > 0) {
+      setShowAboModal(true);
+      return;
+    }
+    proceedWithImport(comptesSelectionnes, comptesMisesAJour);
+  }
+
+  function handleAboConfirm(selection: Set<number>) {
+    setAbosSelectionnes(selection);
+    setShowAboModal(false);
+    const comptesSel = pendingComptesSelection ?? new Set<string>();
+    const comptesOverrides = pendingComptesOverrides;
+    setPendingComptesSelection(null);
+    setPendingComptesOverrides(undefined);
+    proceedWithImport(comptesSel, comptesOverrides);
+  }
+
+  function handleAboCancel() {
+    setShowAboModal(false);
+    const comptesSel = pendingComptesSelection ?? new Set<string>();
+    const comptesOverrides = pendingComptesOverrides;
+    setPendingComptesSelection(null);
+    setPendingComptesOverrides(undefined);
+    setAbosSelectionnes(new Set());
+    proceedWithImport(comptesSel, comptesOverrides);
+  }
+
   async function proceedWithImport(comptesSelectionnes: Set<string>, comptesMisesAJour?: CompteACreer[]) {
     if (!selectedFile) return;
 
     setShowCompteModal(false);
+    setShowAboModal(false);
     setIsLoading(true);
     setError(null);
-    setImportProgress({ stage: "Démarrage...", percent: 0 });
+    setImportProgress({ stage: "Envoi au backend...", percent: 10 });
 
     try {
       const result = await importCSV(
@@ -78,11 +137,34 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
         activeFormat,
         comptesSelectionnes,
         comptesMisesAJour,
+        analyzeAbos.enabled ? { enabled: true, types: Array.from(analyzeAbos.types) } : undefined,
+        abosSuggeres
+          ?.map((a, idx) => ({ ...a, _idx: idx }))
+          ?.filter((a) => abosSelectionnes.has(a._idx as number))
+          ?.map((a) => ({ nom: a.nom, prix: a.prix })) || [],
         (stage: string, percent: number) => {
           setImportProgress({ stage, percent });
         }
       );
+
+      if (result.comptesACreer && result.comptesACreer.length > 0) {
+        setComptesACreer(result.comptesACreer);
+        setShowCompteModal(true);
+        setImportProgress(null);
+        setIsLoading(false);
+        return;
+      }
+
       setImportResult(result);
+      if (result.abonnementsSuggeres) {
+        const defaultSel = new Set(
+          result.abonnementsSuggeres
+            .map((a, idx) => ((a.count_lignes ?? 0) >= 5 ? idx : null))
+            .filter((v): v is number => v !== null)
+        );
+        setAbosSuggeres(result.abonnementsSuggeres);
+        setAbosSelectionnes(defaultSel);
+      }
 
       if (!result.success) {
         setError(`Import terminé avec ${result.stats.erreurs} erreur(s)`);
@@ -97,6 +179,8 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
 
   function handleCancelConfirmation() {
     setShowCompteModal(false);
+    setPendingComptesSelection(null);
+    setPendingComptesOverrides(undefined);
     setIsLoading(false);
   }
 
@@ -128,6 +212,41 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
           <p style={{ fontSize: "0.875rem", color: "#6b7280", marginTop: "0.5rem" }}>
             Colonnes attendues: {Object.values(activeFormat.columns).filter(Boolean).join(", ")}
           </p>
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Options</h2>
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <input
+              type="checkbox"
+              checked={analyzeAbos.enabled}
+              onChange={(e) => setAnalyzeAbos((prev) => ({ ...prev, enabled: e.target.checked }))}
+            />
+            Analyser les abonnements (détection des nouveaux abo)
+          </label>
+          {analyzeAbos.enabled && (
+            <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+              {[{ label: "Fixe", code: 0 }, { label: "Mobile", code: 1 }, { label: "Internet", code: 2 }, { label: "Autre", code: 3 }].map((t) => (
+                <label key={t.code} style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                  <input
+                    type="checkbox"
+                    checked={analyzeAbos.types.has(t.code)}
+                    onChange={(e) =>
+                      setAnalyzeAbos((prev) => {
+                        const next = new Set(prev.types);
+                        if (e.target.checked) next.add(t.code);
+                        else next.delete(t.code);
+                        return { ...prev, types: next };
+                      })
+                    }
+                  />
+                  {t.label}
+                </label>
+              ))}
+            </div>
+          )}
         </div>
       </section>
 
@@ -182,6 +301,14 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
         )}
       </section>
 
+      {showAboModal && abosSuggeres && abosSuggeres.length > 0 && (
+        <AbonnementConfirmationModal
+          abonnements={abosSuggeres}
+          onConfirm={handleAboConfirm}
+          onCancel={handleAboCancel}
+        />
+      )}
+
       {importResult && (
         <section className="card">
           <h2>Résultat de l'import</h2>
@@ -200,6 +327,8 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
               <p>Lignes créées: {importResult.stats.lignes_creees}</p>
               <p>Factures créées: {importResult.stats.factures_creees}</p>
               <p>Lignes-factures créées: {importResult.stats.lignes_factures_creees}</p>
+              <p>Abonnements créés: {importResult.stats.abonnements_crees ?? 0}</p>
+              <p>Lignes-abonnements créées: {importResult.stats.lignes_abonnements_creees ?? 0}</p>
               <p>Factures doublons: {importResult.stats.factures_doublons}</p>
               {importResult.stats.erreurs > 0 && (
                 <p style={{ color: "#dc2626", fontWeight: "600" }}>
@@ -227,7 +356,7 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
       {showCompteModal && (
         <CompteConfirmationModal
           comptesACreer={comptesACreer}
-          onConfirm={proceedWithImport}
+          onConfirm={handleCompteConfirm}
           onCancel={handleCancelConfirmation}
         />
       )}

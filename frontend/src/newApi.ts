@@ -14,6 +14,8 @@ const V2_VIEW = `${API_BASE_URL}/v2/view`;
 const V2_USECASE = `${API_BASE_URL}/v2/usecase`;
 const V2_CONFIG = `${API_BASE_URL}/v2/config`;
 
+export type { CsvFormatConfig } from "./utils/csvFormats";
+
 function logApi(message: string, extra?: Record<string, unknown>) {
   if (import.meta.env.DEV) {
     // Log léger en dev pour suivre les appels
@@ -124,6 +126,23 @@ export async function saveDbPathConfig(dbPath: string | null): Promise<DbPathSav
   );
 }
 
+// CSV formats (persistés backend)
+export async function fetchCsvFormatsBackend(): Promise<CsvFormatConfig[]> {
+  logApi("fetchCsvFormatsBackend");
+  return handleResponse<CsvFormatConfig[]>(await fetch(`${V2_CONFIG}/csv-formats`));
+}
+
+export async function saveCsvFormatBackend(format: CsvFormatConfig): Promise<CsvFormatConfig> {
+  logApi("saveCsvFormatBackend", { id: format.id });
+  return handleResponse<CsvFormatConfig>(
+    await fetch(`${V2_CONFIG}/csv-formats`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(format),
+    })
+  );
+}
+
 // LLM local (Ollama)
 export async function summarizeWithLlm(texts: string[], system?: string): Promise<string> {
   console.log("[LLM] summarize request", {
@@ -203,6 +222,52 @@ export async function autoVerifyFull(factureId: number): Promise<AutoVerifFullRe
   return res.json() as Promise<AutoVerifFullResult>;
 }
 
+// ============================================================================
+// API CALL - IMPORT CSV (backend orchestré)
+// ============================================================================
+
+export interface ImportCsvResponse {
+  status: "requires_account_confirmation" | "dry_run" | "success" | "partial";
+  comptes_a_creer?: { num: string; nom: string; lot: string }[];
+  stats?: any;
+  errors?: string[];
+  upload_id?: string | null;
+  date_min?: string | null;
+  date_max?: string | null;
+  abonnements_suggeres?: { nom: string; prix: number; numeroCompte?: string; numeroAcces?: string | null; numeroFacture?: string; date?: string; typeCode?: number | null }[];
+}
+
+export async function importCsvBackend(params: {
+  entrepriseId: number;
+  file: File;
+  format?: any;
+  confirmedAccounts?: { num: string; nom?: string; lot?: string }[];
+  confirmedAbos?: { nom: string; prix: number }[];
+  analyzeAbos?: { enabled: boolean; types?: number[] };
+  dryRun?: boolean;
+}): Promise<ImportCsvResponse> {
+  const form = new FormData();
+  form.append("entreprise_id", String(params.entrepriseId));
+  form.append("file", params.file);
+  if (params.format) form.append("format", JSON.stringify(params.format));
+  if (params.confirmedAccounts && params.confirmedAccounts.length > 0) {
+    form.append("confirmed_accounts", JSON.stringify(params.confirmedAccounts));
+  }
+  if (params.confirmedAbos && params.confirmedAbos.length > 0) {
+    form.append("confirmed_abos", JSON.stringify(params.confirmedAbos));
+  }
+  if (params.analyzeAbos) {
+    form.append("analyze_abos", JSON.stringify(params.analyzeAbos));
+  }
+  if (params.dryRun) form.append("dry_run", "true");
+  const res = await fetch(`${V2_USECASE}/import-csv`, { method: "POST", body: form });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(body || "Erreur import CSV");
+  }
+  return res.json() as Promise<ImportCsvResponse>;
+}
+
 export interface LigneFacture {
   id: number;
   facture_id: number;
@@ -220,6 +285,39 @@ export interface Abonnement {
   nom: string;
   prix: number;
   commentaire?: string | null;
+}
+
+export interface AbonnementUsageStat {
+  id: number;
+  nom: string;
+  prix: number;
+  commentaire?: string | null;
+  nb_lignes: number;
+  nb_factures: number;
+  total_ht: number;
+}
+
+export interface AbonnementStatsResponse {
+  mois: string;
+  abonnements: AbonnementUsageStat[];
+  lignes_sans_abonnement: number;
+}
+
+export interface LignesParTypeLot {
+  lot: string;
+  total: number;
+  comptes: {
+    compte_id: number;
+    compte_num: string;
+    compte_nom?: string | null;
+    total: number;
+    lignes: { id: number; num: string; nom?: string | null; sous_compte?: string | null }[];
+  }[];
+}
+
+export interface LignesParTypeResponse {
+  type: number;
+  lots: LignesParTypeLot[];
 }
 
 export interface FactureAbonnementLink {
@@ -252,7 +350,9 @@ export interface FactureDetail {
     ligne_facture_id: number;
     ligne_id: number;
     ligne_num: string;
+    nom?: string | null;
     ligne_type: number;
+    sous_compte?: string | null;
     abo: number;
     conso: number;
     remises: number;
@@ -290,6 +390,8 @@ export interface FactureDetailStats {
       abo_id_ref?: number | null;
       abo_nom_ref?: string | null;
       abo_prix_ref?: number | null;
+      sous_compte?: string | null;
+      nom?: string | null;
     }
   >;
   facture_detail: FactureDetail;
@@ -424,6 +526,7 @@ export async function updateLigneFacture(
   return handleResponse<LigneFacture>(res);
 }
 
+// Lignes (télécom)
 // ============================================================================
 // API CALL - ABONNEMENTS
 // ============================================================================
@@ -434,12 +537,67 @@ export async function listAbonnements(): Promise<Abonnement[]> {
 }
 
 export async function attachAbonnementToLines(payload: AbonnementAttachPayload): Promise<AbonnementAttachResponse> {
+  const safePayload = { ...payload };
+  // Backend schema expects null for optional date; avoid sending strings that trigger 422
+  if (safePayload.date === undefined) {
+    delete (safePayload as any).date;
+  } else if (safePayload.date !== null) {
+    safePayload.date = null;
+  }
   const res = await fetch(`${V2_CMD}/abonnements/attacher`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(safePayload),
   });
   return handleResponse<AbonnementAttachResponse>(res);
+}
+
+export async function fetchEntrepriseAbonnementStats(entrepriseId: number): Promise<AbonnementStatsResponse> {
+  const res = await fetch(`${V2_VIEW}/entreprises/${entrepriseId}/abonnements-stats`);
+  return handleResponse<AbonnementStatsResponse>(res);
+}
+
+export async function fetchLignesParType(entrepriseId: number, type: number): Promise<LignesParTypeResponse> {
+  const res = await fetch(`${V2_VIEW}/entreprises/${entrepriseId}/lignes-par-type?type_code=${type}`);
+  return handleResponse<LignesParTypeResponse>(res);
+}
+
+export interface LigneTimelineResponse {
+  ligne: {
+    id: number;
+    num: string;
+    type: number;
+    nom?: string | null;
+    sous_compte?: string | null;
+    compte_id: number;
+    compte_num: string;
+    compte_nom?: string | null;
+    lot?: string | null;
+  };
+  factures: {
+    facture_id: number;
+    facture_num: string;
+    date: string;
+    statut: number;
+    abo: number;
+    conso: number;
+    remises: number;
+    achat: number;
+    total_ht: number;
+    ligne_facture_id: number;
+    ligne_statut: number;
+  }[];
+  abonnements: {
+    abonnement_id: number;
+    nom: string;
+    prix: number;
+    date?: string | null;
+  }[];
+}
+
+export async function fetchLigneTimeline(ligneId: number): Promise<LigneTimelineResponse> {
+  const res = await fetch(`${V2_VIEW}/lignes/${ligneId}/timeline`);
+  return handleResponse<LigneTimelineResponse>(res);
 }
 
 export async function getFactureAbonnements(factureId: number): Promise<FactureAbonnementLink[]> {
@@ -585,11 +743,12 @@ export async function fetchFactures(filters?: {
 
   const url = `${V2_READ}/factures${params.toString() ? `?${params}` : ""}`;
   const res = await fetch(url);
+  logApi("fetchFactures: response", { url, status: res.status });
   return handleResponse<Facture[]>(res);
 }
 
 export async function createFacture(facture: {
-  numero_facture: number;
+  numero_facture: number | string;
   compte_id: number;
   date: string;
   abo: number;
@@ -617,10 +776,14 @@ export async function updateFacture(
   update: { statut?: number }
 ): Promise<Facture> {
   logApi("updateFacture", { id, update });
+  const payload: Record<string, any> = {};
+  if (update.statut !== undefined && update.statut !== null) {
+    payload.statut = update.statut;
+  }
   const res = await fetch(`${V2_CMD}/factures/${id}/update`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(update),
+    body: JSON.stringify(payload),
   });
   return handleResponse<Facture>(res);
 }
@@ -636,12 +799,14 @@ export async function deleteFacture(id: number): Promise<void> {
 export async function fetchFactureDetail(factureId: number): Promise<FactureDetail> {
   logApi("fetchFactureDetail", { factureId });
   const res = await fetch(`${V2_VIEW}/factures/${factureId}/detail`);
+  logApi("fetchFactureDetail: response", { factureId, status: res.status });
   return handleResponse<FactureDetail>(res);
 }
 
 export async function fetchFactureDetailStats(factureId: number): Promise<FactureDetailStats> {
   logApi("fetchFactureDetailStats", { factureId });
   const res = await fetch(`${V2_VIEW}/factures/${factureId}/detail-stats`);
+  logApi("fetchFactureDetailStats: response", { factureId, status: res.status });
   return handleResponse<FactureDetailStats>(res);
 }
 

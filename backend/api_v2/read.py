@@ -185,8 +185,11 @@ def get_ligne_facture(ligne_facture_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/abonnements", response_model=List[AbonnementOut])
-def list_abonnements(db: Session = Depends(get_db)):
-    return db.query(Abonnement).order_by(Abonnement.nom).all()
+def list_abonnements(entreprise_id: int | None = None, db: Session = Depends(get_db)):
+    q = db.query(Abonnement)
+    if entreprise_id is not None:
+        q = q.filter(Abonnement.entreprise_id == entreprise_id)
+    return q.order_by(Abonnement.nom).all()
 
 
 @router.get("/factures/{facture_id}/abonnements")
