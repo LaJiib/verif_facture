@@ -153,30 +153,27 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
         else:
             status = "a_verifier"
             detail = "Aucune référence disponible (abonnement ou facture validée)"
-        line_statuts[line["ligne_facture_id"]] = {
-            "aboNet": status,
-            "achat": "valide" if abs(line["achat"]) < 0.01 else "a_verifier",
-            "comment": detail,
-        }
-        # Consolidation par groupe (pire statut l'emporte)
-        prev = group_statuts.get(group_key, {"aboNet": "valide", "achat": achat_statut})
-        # achat par défaut = statut global achat (mais si achat du groupe nul -> valide)
-        group_achat_status = "valide" if abs(line["achat"]) < 0.01 else achat_statut
-        # pour achat on garde le meilleur (valide si une ligne du groupe est à 0 après consolidation des totaux)
-        if _status_priority(group_achat_status) < _status_priority(prev["achat"]):
-            prev["achat"] = group_achat_status
-        # pire statut aboNet l'emporte
-        worse = status if _status_priority(status) > _status_priority(prev["aboNet"]) else prev["aboNet"]
-        group_statuts[group_key] = {"aboNet": worse, "achat": prev["achat"]}
-
-        # Commentaires
-        group_comments.setdefault(group_key, {})
-        existing_comment = group_comments[group_key].get("aboNet") or ""
-
+            
         if ref_origin == "abonnement_contractuel":
             prefix = f"[Abo: {ref_nom}]" if ref_nom else "[Abo contractuel]"
         else:
             prefix = "[Mois précédents]"
+
+        line_statuts[line["ligne_facture_id"]] = {
+            "aboNet": status,
+            "achat": "valide" if abs(line["achat"]) < 0.01 else "a_verifier",
+            "comment": f"{detail} {prefix}",
+        }
+
+        # Consolidation par groupe (pire statut l'emporte)
+        prev = group_statuts.get(group_key, {"aboNet": "valide", "achat": achat_statut})
+        group_achat_status = "valide" if abs(line["achat"]) < 0.01 else achat_statut
+        if _status_priority(group_achat_status) < _status_priority(prev["achat"]):
+            prev["achat"] = group_achat_status
+        worse = status if _status_priority(status) > _status_priority(prev["aboNet"]) else prev["aboNet"]
+        group_statuts[group_key] = {"aboNet": worse, "achat": prev["achat"]}
+
+        group_comments.setdefault(group_key, {})
         _comment_entries.setdefault(group_key, []).append((prefix, detail, line["ligne_num"]))
 
     _COMMENT_GROUP_THRESHOLD = 5
