@@ -22,25 +22,17 @@ def _prev_month_range(target: datetime.date) -> Tuple[datetime.date, datetime.da
     return prev_month_start, prev_month_last_day
 
 
-def _get_prev_month_subscription_price(ligne_id: int, facture_date: datetime.date, db: Session) -> Optional[float]:
-    start, end = _prev_month_range(facture_date)
+def _get_active_subscription_price(ligne_id: int, db: Session) -> Optional[Tuple[float, str]]:
     row = (
-        db.query(LigneAbonnement, Abonnement)
-        .join(Abonnement, LigneAbonnement.abonnement_id == Abonnement.id)
-        .filter(
-            LigneAbonnement.ligne_id == ligne_id,
-            LigneAbonnement.date != None,  # noqa: E711
-            LigneAbonnement.date >= start,
-            LigneAbonnement.date <= end,
-        )
-        .order_by(LigneAbonnement.date.desc())
+        db.query(Abonnement.prix, Abonnement.nom)
+        .join(LigneAbonnement, LigneAbonnement.abonnement_id == Abonnement.id)
+        .filter(LigneAbonnement.ligne_id == ligne_id)
+        .order_by(LigneAbonnement.date.desc().nullslast())
         .first()
     )
     if row:
-        _, ab = row
-        return float(ab.prix)
+        return float(row.prix), str(row.nom or "")
     return None
-
 
 def _get_nearest_validated_facture(compte_id: int, target_date: datetime.date, db: Session, exclude_id: Optional[int] = None) -> Optional[Facture]:
     rows = (
@@ -135,16 +127,18 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
     group_statuts: Dict[str, Dict[str, str]] = {}
     group_comments: Dict[str, Dict[str, Optional[str]]] = {}
     group_anomalies: Dict[str, List[AutoVerifAnomaly]] = {}
-
+    _comment_entries: Dict[str, List[tuple]] = {}
     # Références par ligne
     for line in lignes:
         group_key = f"{line['ligne_type']}|{line['net_abo']:.2f}"
-        ref_price = _get_prev_month_subscription_price(line["ligne_id"], facture.date, db)
-        ref_origin = "abonnement_prec"
-        if ref_price is None:
+        ref_nom = None
+        abo_result = _get_active_subscription_price(line["ligne_id"], db)
+        if abo_result is not None:
+            ref_price, ref_nom = abo_result
+            ref_origin = "abonnement_contractuel"
+        else:
             ref_price = _get_nearest_validated_facture_ref(line["ligne_id"], facture.compte_id, facture.date, db, exclude_id=facture.id)
             ref_origin = "facture_validee"
-
         if ref_price is not None:
             if abs(line["net_abo"] - ref_price) < 0.01:
                 status = "valide"
@@ -173,15 +167,39 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
         # Commentaires
         group_comments.setdefault(group_key, {})
         existing_comment = group_comments[group_key].get("aboNet") or ""
-        prefix = "[Réf abo préc]" if ref_origin == "abonnement_prec" else "[Réf facture validée]"
-        comment_line = f"{prefix} {line['ligne_num']}: {detail}"
-        group_comments[group_key]["aboNet"] = (existing_comment + "\n" + comment_line).strip()
+
+        if ref_origin == "abonnement_contractuel":
+            prefix = f"[Abo: {ref_nom}]" if ref_nom else "[Abo contractuel]"
+        else:
+            prefix = "[Mois précédents]"
+        _comment_entries.setdefault(group_key, []).append((prefix, detail, line["ligne_num"]))
+
+    _COMMENT_GROUP_THRESHOLD = 5
+
+    for group_key, entries in _comment_entries.items():
+        # Regroupe par (prefix, detail)
+        counts: Dict[tuple, list] = {}
+        for prefix, detail, ligne_num in entries:
+            key_pd = (prefix, detail)
+            counts.setdefault(key_pd, []).append(ligne_num)
+
+        lines_out = []
+        for (prefix, detail), ligne_nums in counts.items():
+            if len(ligne_nums) > _COMMENT_GROUP_THRESHOLD:
+                lines_out.append(f"{len(ligne_nums)} lignes: {detail} {prefix}")
+            else:
+                for num in ligne_nums:
+                    lines_out.append(f"{num}: {detail} {prefix}")
+
+        group_comments.setdefault(group_key, {})
+        group_comments[group_key]["aboNet"] = "\n".join(lines_out)
 
     # Ajuste achat statut à partir des totaux par groupe
     for key, lines_in_group in _group_lines_by_key(lignes).items():
         total_achat = sum(l["achat"] for l in lines_in_group)
         if abs(total_achat) < 0.01:
             group_statuts[key]["achat"] = "valide"
+            
 
     # Statut global aboNet agrégé
     global_abo_status = "valide"
@@ -222,6 +240,11 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
         )
         prev_map = {row.ligne_id: row for row in prev_lines_rows}
         seen_prev = set()
+        # Accumulateur: group_key -> list of (prefix, detail, ligne_num)
+        _comment_entries: Dict[str, List[tuple]] = {}
+
+        line_statuts: Dict[int, dict] = {}
+
         for line in lignes:
             prev = prev_map.get(line["ligne_id"])
             group_key = f"{line['ligne_type']}|{line['net_abo']:.2f}"

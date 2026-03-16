@@ -346,6 +346,11 @@ class AutoVerifAnomaly(BaseModel):
     prev_achat: Optional[float] = None
     curr_achat: Optional[float] = None
 
+class LineStatutItem(BaseModel):
+    aboNet: str
+    achat: str
+    comment: Optional[str] = None
+
 
 class AutoVerifFullResult(BaseModel):
     metricStatuts: Dict[str, str]
@@ -356,3 +361,4 @@ class AutoVerifFullResult(BaseModel):
     groupAnomalies: Dict[str, List[AutoVerifAnomaly]]
     summary: Dict[str, Any]
     previousFactureNum: Optional[str] = None
+    lineStatuts: Dict[int, LineStatutItem] = {}  # keyed by ligne_facture_id
