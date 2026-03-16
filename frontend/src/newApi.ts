@@ -14,6 +14,8 @@ const V2_VIEW = `${API_BASE_URL}/v2/view`;
 const V2_USECASE = `${API_BASE_URL}/v2/usecase`;
 const V2_CONFIG = `${API_BASE_URL}/v2/config`;
 
+import type { CsvFormatConfig } from "./utils/csvFormats";
+
 export type { CsvFormatConfig } from "./utils/csvFormats";
 
 function logApi(message: string, extra?: Record<string, unknown>) {
