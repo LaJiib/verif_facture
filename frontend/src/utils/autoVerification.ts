@@ -28,6 +28,7 @@ export interface AutoVerificationResult {
   groupStatuts: Record<string, { aboNet: StatutValeur; achat: StatutValeur }>;
   groupComments: Record<string, { aboNet?: string; achat?: string }>;
   groupAnomalies: Record<string, LigneAnomalie[]>;
+  lineStatuts: Record<number, { aboNet: StatutValeur; achat: StatutValeur; comment?: string }>;
   summary: { added: number; removed: number; modified: number; previousFactureId: number | null; previousFactureNum?: string | null };
 }
 
@@ -63,6 +64,14 @@ function mapResult(res: AutoVerifFullResult): AutoVerificationResult {
   Object.entries(res.groupAnomalies || {}).forEach(([key, anomalies]) => {
     groupAnomalies[key] = (anomalies as any[]).map(coerceAnomalie);
   });
+  const lineStatuts: AutoVerificationResult["lineStatuts"] = {};
+  Object.entries(res.lineStatuts || {}).forEach(([id, val]) => {
+    lineStatuts[Number(id)] = {
+      aboNet: coerceStatut(val.aboNet),
+      achat: coerceStatut(val.achat),
+      comment: val.comment,
+    };
+  });
   return {
     metricStatuts,
     metricComments: res.metricComments || {},
@@ -70,6 +79,7 @@ function mapResult(res: AutoVerifFullResult): AutoVerificationResult {
     groupStatuts,
     groupComments: res.groupComments || {},
     groupAnomalies,
+    lineStatuts,
     summary: res.summary as AutoVerificationResult["summary"],
   };
 }

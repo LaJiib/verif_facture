@@ -212,6 +212,7 @@ export interface AutoVerifFullResult {
   groupAnomalies: Record<string, { kind: string; line?: string; detail: string; prev_net?: number; curr_net?: number; prev_achat?: number; curr_achat?: number }[]>;
   summary: { added: number; removed: number; modified: number; previousFactureId: number | null; previousFactureNum?: string | null };
   previousFactureNum?: string | null;
+  lineStatuts?: Record<number, { aboNet: string; achat: string; comment?: string }>;
 }
 
 export async function autoVerifyFull(factureId: number): Promise<AutoVerifFullResult> {

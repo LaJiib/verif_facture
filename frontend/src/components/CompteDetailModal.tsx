@@ -134,6 +134,7 @@ interface FactureLigneGroupe {
   achat: number;
   abo_nom?: string | null;
   abo_id?: number | null;
+  ligne_facture_ids?: number[];
 }
 
 interface BackendLigneGroupe {
@@ -150,6 +151,7 @@ interface BackendLigneGroupe {
   conso: number;
   achat: number;
   total: number;
+  ligne_facture_ids?: number[];
 }
 
 interface FactureResumeBackend {
@@ -250,6 +252,9 @@ export default function CompteDetailModal({
   const [factureGroupStatuts, setFactureGroupStatuts] = useState<
     Record<number, Record<string, { aboNet: StatutValeur; achat: StatutValeur }>>
   >({});
+  const [factureLineStatuts, setFactureLineStatuts] = useState<
+    Record<number, Record<number, { aboNet: StatutValeur; achat: StatutValeur; comment?: string }>>
+  >({});
   const [factureMetricComments, setFactureMetricComments] = useState<
     Record<number, { aboNet?: string; ecart?: string; achat?: string; conso?: string }>
   >({});
@@ -289,7 +294,7 @@ export default function CompteDetailModal({
   const [rapportPanelCollapsed, setRapportPanelCollapsed] = useState(false);
   const [selectedSousComptesTab, setSelectedSousComptesTab] = useState<Set<string>>(new Set());
   const [sousCompteTabOpen, setSousCompteTabOpen] = useState(false);
-
+  
   useEffect(() => {
     loadData();
   }, [compteId, mois]);
@@ -380,32 +385,16 @@ export default function CompteDetailModal({
         factureId: factureCourante.facture_id,
       });
 
-      // Harmonise les clés de groupe (backend regroupe en price|type|net ou abo|id|type|net)
-      const expandGroupKeys = <T,>(obj: Record<string, T>): Record<string, T> => {
-        const next: Record<string, T> = {};
-        Object.entries(obj || {}).forEach(([k, v]) => {
-          next[k] = v;
-          if (!k.startsWith("abo|") && !k.startsWith("price|")) {
-            next[`price|${k}`] = v;
-          }
-        });
-        return next;
-      };
-
       setFactureStatuts((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.metricStatuts }));
       setFactureMetricComments((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.metricComments }));
       setFactureMetricReals((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.metricReals }));
-      setFactureGroupStatuts((prev) => ({
-        ...prev,
-        [factureCourante.facture_id]: expandGroupKeys(autoResult.groupStatuts),
-      }));
-      setFactureGroupComments((prev) => ({
-        ...prev,
-        [factureCourante.facture_id]: expandGroupKeys(autoResult.groupComments),
-      }));
       setFactureGroupAnomalies((prev) => ({
         ...prev,
-        [factureCourante.facture_id]: expandGroupKeys(autoResult.groupAnomalies),
+        [factureCourante.facture_id]: autoResult.groupAnomalies,
+      }));
+      setFactureLineStatuts((prev) => ({
+        ...prev,
+        [factureCourante.facture_id]: autoResult.lineStatuts,
       }));
 
       console.log("[Auto] Resume calcule", autoResult);
@@ -449,8 +438,18 @@ export default function CompteDetailModal({
       metricStatuts: { ecart: glob.ecart, achat: glob.achat },
       metricReals: factureMetricReals[factureCourante.facture_id] || {},
       metricComments: factureMetricComments[factureCourante.facture_id] || {},
-      groupStatuts: factureGroupStatuts[factureCourante.facture_id] || {},
-      groupComments: factureGroupComments[factureCourante.facture_id] || {},
+      groupStatuts: Object.fromEntries(
+        resolvedGroupRows.map((row) => [
+          `${row.group.ligne_type}|${((row.group as any).prix_abo || 0).toFixed(2)}`,
+          row.stat,
+        ])
+      ),
+      groupComments: Object.fromEntries(
+        resolvedGroupRows.map((row) => [
+          `${row.group.ligne_type}|${((row.group as any).prix_abo || 0).toFixed(2)}`,
+          row.comment,
+        ])
+      ),
       groupReals: factureGroupReals[factureCourante.facture_id] || {},
       globalComment: factureCommentaires[factureCourante.facture_id],
       logoDataUrl: logoDataUrl || undefined,
@@ -785,6 +784,7 @@ export default function CompteDetailModal({
             achat: g.achat,
             abo_nom: g.abo_nom_ref,
             abo_id: g.abo_id_ref,
+            ligne_facture_ids: g.ligne_facture_ids || [],
           }))
         );
       } else {
@@ -954,78 +954,51 @@ export default function CompteDetailModal({
   const resolvedGroupRows = useMemo(() => {
     if (!factureCourante) return [];
     const fid = factureCourante.facture_id;
-    const statMap = factureGroupStatuts[fid] || {};
-    const commentMap = factureGroupComments[fid] || {};
+    const lineStatuts = factureLineStatuts[fid] || {};
     const anomaliesMap = factureGroupAnomalies[fid] || {};
     const aboSelectMap = factureGroupAbonnements[fid] || {};
 
-    const baseGroups = ligneGroupesFacture
+    const worstCase = (vals: string[]): StatutValeur => {
+      if (vals.includes("conteste")) return "conteste";
+      if (vals.includes("a_verifier")) return "a_verifier";
+      return "valide";
+    };
+
+    const COMMENT_THRESHOLD = 5;
+
+    return ligneGroupesFacture
       .filter((g) => g.facture_id === fid)
-      .map((g) => ({
-        ...g,
-        netUnit: g.count ? (g.netAbo || 0) / g.count : Number(g.netAbo || g.match_net || 0),
-      }));
+      .map((g) => {
+        const lfIds: number[] = (g as any).ligne_facture_ids || [];
+        const lineData = lfIds.map((id) => lineStatuts[id]).filter(Boolean);
 
-    const canonicalKey = (type: number | null, net: number | null, aboId?: number | null) => {
-      const netStr = net !== null && !Number.isNaN(net) ? net.toFixed(2) : "0.00";
-      if (aboId !== null && aboId !== undefined) return `abo|${aboId}|${type}|${netStr}`;
-      return `price|${type}|${netStr}`;
-    };
+        const aboNetStatut = lineData.length > 0
+          ? worstCase(lineData.map((s) => s.aboNet))
+          : "a_verifier";
+        const achatStatut = lineData.length > 0
+          ? worstCase(lineData.map((s) => s.achat))
+          : "a_verifier";
 
-    const byKey = new Map<string, any>();
-    baseGroups.forEach((g) => {
-      const key = canonicalKey(g.ligne_type, Number(g.netUnit || 0), (g as any).abo_id);
-      byKey.set(key, {
-        key,
-        group: g,
-        stat: { aboNet: "a_verifier", achat: "a_verifier" },
-        comment: {},
-        anomalies: [],
-        aboSelection: undefined,
+        const commentCounts: Record<string, number> = {};
+        lineData.forEach((s) => {
+          if (s.comment) commentCounts[s.comment] = (commentCounts[s.comment] || 0) + 1;
+        });
+        const aboNetComment = Object.entries(commentCounts)
+          .map(([text, count]) => (count > COMMENT_THRESHOLD ? `${count} lignes: ${text}` : text))
+          .join("\n") || undefined;
+
+        return {
+          key: g.group_key,
+          group: { ...g, netUnit: g.count ? (g.netAbo || 0) / g.count : 0 },
+          stat: { aboNet: aboNetStatut, achat: achatStatut },
+          comment: { aboNet: aboNetComment, achat: undefined },
+          anomalies: anomaliesMap[g.group_key] || [],
+          aboSelection: aboSelectMap[g.group_key],
+        };
       });
-    });
-
-    const parseKey = (key: string) => {
-      if (key.startsWith("abo|")) {
-        const [, aboId, type, net] = key.split("|");
-        return { aboId: Number(aboId), lineType: Number(type), net: Number(net) };
-      }
-      if (key.startsWith("price|")) {
-        const [, type, net] = key.split("|");
-        return { aboId: null, lineType: Number(type), net: Number(net) };
-      }
-      const [type, net] = key.split("|");
-      return { aboId: null, lineType: Number(type), net: Number(net) };
-    };
-
-    const resolveKey = (parsed: { lineType: number | null; net: number | null; aboId: number | null }) => {
-      const base = canonicalKey(parsed.lineType ?? 0, parsed.net ?? 0, parsed.aboId);
-      if (byKey.has(base)) return base;
-      const fallback = canonicalKey(parsed.lineType ?? 0, parsed.net ?? 0, null);
-      if (byKey.has(fallback)) return fallback;
-      return base;
-    };
-
-    Object.entries(statMap).forEach(([key, value]) => {
-      const parsed = parseKey(key);
-      const resolvedKey = resolveKey(parsed);
-      const existing = byKey.get(resolvedKey);
-      // Si aucun groupe courant ne correspond, on ignore l'ancien enregistrement pour ne pas afficher un regroupement vide
-      if (!existing) return;
-      byKey.set(resolvedKey, {
-        ...existing,
-        stat: value,
-        comment: (commentMap as any)[key],
-        anomalies: (anomaliesMap as any)[key] || [],
-        aboSelection: (aboSelectMap as any)[key],
-      });
-    });
-
-    return Array.from(byKey.values());
   }, [
     factureCourante,
-    factureGroupStatuts,
-    factureGroupComments,
+    factureLineStatuts,
     factureGroupAnomalies,
     factureGroupAbonnements,
     ligneGroupesFacture,
@@ -1267,6 +1240,9 @@ export default function CompteDetailModal({
           if (data.groupAnomalies) {
             setFactureGroupAnomalies((prev) => ({ ...prev, [selectedFactureId]: data.groupAnomalies }));
           }
+          if (data.lineStatuts) {
+            setFactureLineStatuts((prev) => ({ ...prev, [selectedFactureId]: data.lineStatuts }));
+          }
           if (data.groupAbonnements) {
             setFactureGroupAbonnements((prev) => ({ ...prev, [selectedFactureId]: data.groupAbonnements }));
           }
@@ -1346,20 +1322,29 @@ export default function CompteDetailModal({
     }));
   }
 
+
   function updateGroupStatut(
     factureId: number,
     groupKey: string,
     key: "aboNet" | "achat",
     value: StatutValeur
   ) {
-    setFactureGroupStatuts((prev) => ({
-      ...prev,
-      [factureId]: {
-        ...(prev[factureId] || {}),
-        [groupKey]: { ...(prev[factureId]?.[groupKey] || { aboNet: "a_verifier", achat: "a_verifier" }), [key]: value },
-      },
-    }));
-    // Propagation backend: si on change le statut aboNet, on met a jour les lignesFactures du groupe
+    // Trouve les ligne_facture_ids du groupe
+    const group = ligneGroupesFacture.find((g) => g.facture_id === factureId && g.group_key === groupKey);
+    const lfIds: number[] = (group as any)?.ligne_facture_ids || [];
+
+    // Met à jour factureLineStatuts pour toutes les lignes du groupe
+    if (lfIds.length > 0) {
+      setFactureLineStatuts((prev) => {
+        const current = prev[factureId] || {};
+        const updated = { ...current };
+        lfIds.forEach((id) => {
+          updated[id] = { ...(current[id] || { aboNet: "a_verifier", achat: "a_verifier" }), [key]: value };
+        });
+        return { ...prev, [factureId]: updated };
+      });
+    }
+
     if (key === "aboNet") {
       applyGroupStatutToLines(factureId, groupKey, value).catch((err) => {
         console.error("Erreur maj statut lignesFactures", err);
@@ -1624,11 +1609,9 @@ export default function CompteDetailModal({
       facture_id: selectedFactureId,
       commentaire: factureCommentaires[selectedFactureId] || null,
       data: {
-        // On ne conserve plus que le statut global d'ecart
         metricStatuts: { ecart: factureStatuts[selectedFactureId]?.ecart || "a_verifier" },
-        groupStatuts: factureGroupStatuts[selectedFactureId] || {},
+        lineStatuts: factureLineStatuts[selectedFactureId] || {},
         metricComments: factureMetricComments[selectedFactureId] || {},
-        groupComments: factureGroupComments[selectedFactureId] || {},
         metricReals: factureMetricReals[selectedFactureId] || {},
         groupReals: factureGroupReals[selectedFactureId] || {},
         groupAnomalies: factureGroupAnomalies[selectedFactureId] || {},
@@ -1641,15 +1624,15 @@ export default function CompteDetailModal({
       // Determine statut facture: conteste > valide > importe
       // Les statuts globaux: on ne prend en compte que l'ecart (aboNet/achat sont geres par groupe)
       const ecartStatut = factureStatuts[selectedFactureId]?.ecart || "a_verifier";
-      const groupStatuts = factureGroupStatuts[selectedFactureId] || {};
+      const lineStatutsForFact = Object.values(factureLineStatuts[selectedFactureId] || {});
 
       const hasConteste =
         ecartStatut === "conteste" ||
-        Object.values(groupStatuts).some((g) => g.aboNet === "conteste" || g.achat === "conteste");
+        lineStatutsForFact.some((l) => l.aboNet === "conteste" || l.achat === "conteste");
 
       const hasPending =
         ecartStatut === "a_verifier" ||
-        Object.values(groupStatuts).some((g) => g.aboNet === "a_verifier" || g.achat === "a_verifier");
+        lineStatutsForFact.some((l) => l.aboNet === "a_verifier" || l.achat === "a_verifier");
 
       const allValide = !hasConteste && !hasPending;
 

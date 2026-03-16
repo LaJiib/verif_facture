@@ -128,6 +128,7 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
     group_comments: Dict[str, Dict[str, Optional[str]]] = {}
     group_anomalies: Dict[str, List[AutoVerifAnomaly]] = {}
     _comment_entries: Dict[str, List[tuple]] = {}
+    line_statuts: Dict[int, dict] = {}
     # Références par ligne
     for line in lignes:
         group_key = f"{line['ligne_type']}|{line['net_abo']:.2f}"
@@ -152,7 +153,11 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
         else:
             status = "a_verifier"
             detail = "Aucune référence disponible (abonnement ou facture validée)"
-
+        line_statuts[line["ligne_facture_id"]] = {
+            "aboNet": status,
+            "achat": "valide" if abs(line["achat"]) < 0.01 else "a_verifier",
+            "comment": detail,
+        }
         # Consolidation par groupe (pire statut l'emporte)
         prev = group_statuts.get(group_key, {"aboNet": "valide", "achat": achat_statut})
         # achat par défaut = statut global achat (mais si achat du groupe nul -> valide)
@@ -199,7 +204,7 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
         total_achat = sum(l["achat"] for l in lines_in_group)
         if abs(total_achat) < 0.01:
             group_statuts[key]["achat"] = "valide"
-            
+
 
     # Statut global aboNet agrégé
     global_abo_status = "valide"
@@ -240,10 +245,6 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
         )
         prev_map = {row.ligne_id: row for row in prev_lines_rows}
         seen_prev = set()
-        # Accumulateur: group_key -> list of (prefix, detail, ligne_num)
-        _comment_entries: Dict[str, List[tuple]] = {}
-
-        line_statuts: Dict[int, dict] = {}
 
         for line in lignes:
             prev = prev_map.get(line["ligne_id"])
@@ -313,6 +314,7 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
         groupAnomalies=group_anomalies,
         summary=summary,
         previousFactureNum=summary.get("previousFactureNum"),
+        lineStatuts={int(k): v for k, v in line_statuts.items()},
     )
 
 
