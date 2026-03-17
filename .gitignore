@@ -11,3 +11,8 @@ frontend/dist/
 .vscode/
 .claude/
 data/
+invoices.backup_20260317_111133.db
+invoices.backup_20260317_114548.db
+invoices.db
+migrate_normalize_group_keys.py
+migratev3.py

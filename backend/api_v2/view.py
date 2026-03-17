@@ -565,8 +565,9 @@ def facture_detail_stats(facture_id: int, db: Session = Depends(get_db)):
     # Groupes de lignes par caractÈristiques principales (type + abo ref + net unitaire arrondi au centime)
     def _group_key(lf: FactureDetailLine) -> str:
         net_unit = round(lf.abo + lf.remises, 2)
-        abo_part = f"abo:{lf.abo_id_ref}" if lf.abo_id_ref else "noabo"
-        return f"type:{lf.ligne_type}|{abo_part}|net:{net_unit:.2f}"
+        if lf.abo_id_ref:
+            return f"abo|{lf.abo_id_ref}|{lf.ligne_type}|{net_unit:.2f}"
+        return f"price|{lf.ligne_type}|{net_unit:.2f}"
 
     groupes_map: Dict[str, Dict[str, float | int | str | None]] = {}
     for lf in base_detail.lignes:

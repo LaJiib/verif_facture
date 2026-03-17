@@ -388,6 +388,8 @@ export default function CompteDetailModal({
       setFactureStatuts((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.metricStatuts }));
       setFactureMetricComments((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.metricComments }));
       setFactureMetricReals((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.metricReals }));
+      setFactureGroupStatuts((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.groupStatuts }));
+      setFactureGroupComments((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.groupComments }));
       setFactureGroupAnomalies((prev) => ({
         ...prev,
         [factureCourante.facture_id]: autoResult.groupAnomalies,
@@ -954,6 +956,8 @@ export default function CompteDetailModal({
   const resolvedGroupRows = useMemo(() => {
     if (!factureCourante) return [];
     const fid = factureCourante.facture_id;
+    const groupStatutsMap = factureGroupStatuts[fid] || {};
+    const groupCommentsMap = factureGroupComments[fid] || {};
     const lineStatuts = factureLineStatuts[fid] || {};
     const anomaliesMap = factureGroupAnomalies[fid] || {};
     const aboSelectMap = factureGroupAbonnements[fid] || {};
@@ -969,13 +973,15 @@ export default function CompteDetailModal({
     return ligneGroupesFacture
       .filter((g) => g.facture_id === fid)
       .map((g) => {
+        const explicitStat = groupStatutsMap[g.group_key];
+        const explicitComment = groupCommentsMap[g.group_key] || {};
         const lfIds: number[] = (g as any).ligne_facture_ids || [];
         const lineData = lfIds.map((id) => lineStatuts[id]).filter(Boolean);
 
-        const aboNetStatut = lineData.length > 0
+        const fallbackAboNetStatut = lineData.length > 0
           ? worstCase(lineData.map((s) => s.aboNet))
           : "a_verifier";
-        const achatStatut = lineData.length > 0
+        const fallbackAchatStatut = lineData.length > 0
           ? worstCase(lineData.map((s) => s.achat))
           : "a_verifier";
 
@@ -983,21 +989,27 @@ export default function CompteDetailModal({
         lineData.forEach((s) => {
           if (s.comment) commentCounts[s.comment] = (commentCounts[s.comment] || 0) + 1;
         });
-        const aboNetComment = Object.entries(commentCounts)
+        const fallbackAboNetComment = Object.entries(commentCounts)
           .map(([text, count]) => (count > COMMENT_THRESHOLD ? `${count} lignes: ${text}` : text))
           .join("\n") || undefined;
+        const aboNetStatut = explicitStat?.aboNet ?? fallbackAboNetStatut;
+        const achatStatut = explicitStat?.achat ?? fallbackAchatStatut;
+        const aboNetComment = explicitComment.aboNet ?? fallbackAboNetComment;
+        const achatComment = explicitComment.achat ?? undefined;
 
         return {
           key: g.group_key,
           group: { ...g, netUnit: g.count ? (g.netAbo || 0) / g.count : 0 },
           stat: { aboNet: aboNetStatut, achat: achatStatut },
-          comment: { aboNet: aboNetComment, achat: undefined },
+          comment: { aboNet: aboNetComment, achat: achatComment },
           anomalies: anomaliesMap[g.group_key] || [],
           aboSelection: aboSelectMap[g.group_key],
         };
       });
   }, [
     factureCourante,
+    factureGroupStatuts,
+    factureGroupComments,
     factureLineStatuts,
     factureGroupAnomalies,
     factureGroupAbonnements,
@@ -1329,6 +1341,17 @@ export default function CompteDetailModal({
     key: "aboNet" | "achat",
     value: StatutValeur
   ) {
+    setFactureGroupStatuts((prev) => ({
+      ...prev,
+      [factureId]: {
+        ...(prev[factureId] || {}),
+        [groupKey]: {
+          ...(prev[factureId]?.[groupKey] || { aboNet: "a_verifier", achat: "a_verifier" }),
+          [key]: value,
+        },
+      },
+    }));
+
     // Trouve les ligne_facture_ids du groupe
     const group = ligneGroupesFacture.find((g) => g.facture_id === factureId && g.group_key === groupKey);
     const lfIds: number[] = (group as any)?.ligne_facture_ids || [];
@@ -1610,6 +1633,8 @@ export default function CompteDetailModal({
       commentaire: factureCommentaires[selectedFactureId] || null,
       data: {
         metricStatuts: { ecart: factureStatuts[selectedFactureId]?.ecart || "a_verifier" },
+        groupStatuts: factureGroupStatuts[selectedFactureId] || {},
+        groupComments: factureGroupComments[selectedFactureId] || {},
         lineStatuts: factureLineStatuts[selectedFactureId] || {},
         metricComments: factureMetricComments[selectedFactureId] || {},
         metricReals: factureMetricReals[selectedFactureId] || {},
