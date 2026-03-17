@@ -1,8 +1,16 @@
 import { useEffect, useState } from "react";
-import { analyzeCSV, importCSV, type ImportResult, type CompteACreer } from "../csvImporter";
+import {
+  analyzeCSV,
+  importCSV,
+  type ImportResult,
+  type CompteACreer,
+  type ConflitDecision,
+  type ConflitFacture,
+} from "../csvImporter";
 import { CsvFormatConfig, DEFAULT_CSV_FORMAT } from "../utils/csvFormats";
 import CompteConfirmationModal from "../components/CompteConfirmationModal";
 import AbonnementConfirmationModal from "../components/AbonnementConfirmationModal";
+import ConflitModal from "../components/ConflitModal";
 
 interface ImportPageProps {
   entrepriseId: number;
@@ -26,6 +34,9 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
   const [showAboModal, setShowAboModal] = useState(false);
   const [pendingComptesSelection, setPendingComptesSelection] = useState<Set<string> | null>(null);
   const [pendingComptesOverrides, setPendingComptesOverrides] = useState<CompteACreer[] | undefined>(undefined);
+  const [showConflitModal, setShowConflitModal] = useState(false);
+  const [conflits, setConflits] = useState<ConflitFacture[]>([]);
+  const [pendingConflitDecisions, setPendingConflitDecisions] = useState<ConflitDecision[] | null>(null);
 
   // Étape de confirmation des comptes
   const [showCompteModal, setShowCompteModal] = useState(false);
@@ -56,9 +67,12 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
     setImportResult(null);
     setPendingComptesSelection(null);
     setPendingComptesOverrides(undefined);
+    setPendingConflitDecisions(null);
+    setShowConflitModal(false);
+    setConflits([]);
 
     try {
-      const { comptesACreer, abonnementsSuggeres } = await analyzeCSV(
+      const { comptesACreer, abonnementsSuggeres, conflits: conflitsDetectes } = await analyzeCSV(
         selectedFile,
         entrepriseId,
         activeFormat,
@@ -72,6 +86,7 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
       );
       setAbosSuggeres(abonnementsSuggeres || []);
       setAbosSelectionnes(defaultSel);
+      setConflits(conflitsDetectes || []);
 
       if (comptesACreer.length > 0) {
         // Il y a des comptes à créer, afficher la modale
@@ -79,6 +94,10 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
         setShowCompteModal(true);
       } else if ((abonnementsSuggeres || []).length > 0) {
         setShowAboModal(true);
+      } else if ((conflitsDetectes || []).length > 0) {
+        setPendingComptesSelection(new Set());
+        setPendingComptesOverrides(undefined);
+        setShowConflitModal(true);
       } else {
         // Pas de nouveaux comptes, importer directement
         await proceedWithImport(new Set());
@@ -98,6 +117,10 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
       setShowAboModal(true);
       return;
     }
+    if (conflits && conflits.length > 0) {
+      setShowConflitModal(true);
+      return;
+    }
     proceedWithImport(comptesSelectionnes, comptesMisesAJour);
   }
 
@@ -106,8 +129,10 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
     setShowAboModal(false);
     const comptesSel = pendingComptesSelection ?? new Set<string>();
     const comptesOverrides = pendingComptesOverrides;
-    setPendingComptesSelection(null);
-    setPendingComptesOverrides(undefined);
+    if (conflits && conflits.length > 0) {
+      setShowConflitModal(true);
+      return;
+    }
     proceedWithImport(comptesSel, comptesOverrides);
   }
 
@@ -115,17 +140,39 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
     setShowAboModal(false);
     const comptesSel = pendingComptesSelection ?? new Set<string>();
     const comptesOverrides = pendingComptesOverrides;
-    setPendingComptesSelection(null);
-    setPendingComptesOverrides(undefined);
     setAbosSelectionnes(new Set());
+    if (conflits && conflits.length > 0) {
+      setShowConflitModal(true);
+      return;
+    }
     proceedWithImport(comptesSel, comptesOverrides);
   }
 
-  async function proceedWithImport(comptesSelectionnes: Set<string>, comptesMisesAJour?: CompteACreer[]) {
+  function handleConflitConfirm(decisions: ConflitDecision[]) {
+    setPendingConflitDecisions(decisions);
+    setShowConflitModal(false);
+    proceedWithImport(pendingComptesSelection ?? new Set(), pendingComptesOverrides, decisions);
+  }
+
+  function handleConflitCancel() {
+    setPendingConflitDecisions([]);
+    setShowConflitModal(false);
+    proceedWithImport(pendingComptesSelection ?? new Set(), pendingComptesOverrides, []);
+  }
+
+  async function proceedWithImport(
+    comptesSelectionnes: Set<string>,
+    comptesMisesAJour?: CompteACreer[],
+    conflitDecisions?: ConflitDecision[]
+  ) {
     if (!selectedFile) return;
 
     setShowCompteModal(false);
     setShowAboModal(false);
+    setShowConflitModal(false);
+    setPendingComptesSelection(null);
+    setPendingComptesOverrides(undefined);
+    setPendingConflitDecisions(null);
     setIsLoading(true);
     setError(null);
     setImportProgress({ stage: "Envoi au backend...", percent: 10 });
@@ -144,11 +191,16 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
           ?.map((a) => ({ nom: a.nom, prix: a.prix })) || [],
         (stage: string, percent: number) => {
           setImportProgress({ stage, percent });
-        }
+        },
+        conflitDecisions ?? pendingConflitDecisions ?? undefined
       );
 
       if (result.comptesACreer && result.comptesACreer.length > 0) {
         setComptesACreer(result.comptesACreer);
+        if (result.abonnementsSuggeres) {
+          setAbosSuggeres(result.abonnementsSuggeres);
+        }
+        setConflits(result.conflits || []);
         setShowCompteModal(true);
         setImportProgress(null);
         setIsLoading(false);
@@ -156,6 +208,7 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
       }
 
       setImportResult(result);
+      setConflits(result.conflits || []);
       if (result.abonnementsSuggeres) {
         const defaultSel = new Set(
           result.abonnementsSuggeres
@@ -179,8 +232,10 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
 
   function handleCancelConfirmation() {
     setShowCompteModal(false);
+    setShowConflitModal(false);
     setPendingComptesSelection(null);
     setPendingComptesOverrides(undefined);
+    setPendingConflitDecisions(null);
     setIsLoading(false);
   }
 
@@ -330,6 +385,9 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
               <p>Abonnements créés: {importResult.stats.abonnements_crees ?? 0}</p>
               <p>Lignes-abonnements créées: {importResult.stats.lignes_abonnements_creees ?? 0}</p>
               <p>Factures doublons: {importResult.stats.factures_doublons}</p>
+              {(importResult.stats.factures_mises_a_jour ?? 0) > 0 && (
+                <p>✏️ {importResult.stats.factures_mises_a_jour} facture(s) mise(s) a jour</p>
+              )}
               {importResult.stats.erreurs > 0 && (
                 <p style={{ color: "#dc2626", fontWeight: "600" }}>
                   Erreurs: {importResult.stats.erreurs}
@@ -358,6 +416,14 @@ export default function ImportPage({ entrepriseId, csvFormats, onBack }: ImportP
           comptesACreer={comptesACreer}
           onConfirm={handleCompteConfirm}
           onCancel={handleCancelConfirmation}
+        />
+      )}
+
+      {showConflitModal && conflits.length > 0 && (
+        <ConflitModal
+          conflits={conflits}
+          onConfirm={handleConflitConfirm}
+          onCancel={handleConflitCancel}
         />
       )}
     </div>

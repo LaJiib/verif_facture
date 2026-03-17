@@ -100,7 +100,19 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
         .all()
     )
     if not lignes_rows:
-        raise HTTPException(status_code=400, detail="Aucune ligne pour cette facture")
+        ecart_val = round(float(facture.total_ht or 0), 2)
+        ecart_statut = "valide" if abs(ecart_val) < 0.01 else "conteste"
+        return AutoVerifFullResult(
+            metricStatuts={"ecart": ecart_statut, "achat": "valide", "aboNet": "a_verifier", "conso": "a_verifier"},
+            metricComments={"ecart": "Aucune ligne importée" if abs(ecart_val) < 0.01 else f"Aucune ligne importée – écart = total facture ({ecart_val:+.2f} €)"},
+            metricReals={"ecart": f"{ecart_val:.2f}"},
+            groupStatuts={},
+            groupComments={},
+            groupAnomalies={},
+            summary={"added": 0, "removed": 0, "modified": 0, "previousFactureId": None, "previousFactureNum": None},
+            previousFactureNum=None,
+            lineStatuts={},
+        )
 
     lignes = [
         {

@@ -20,6 +20,34 @@ from ..models import Compte, Ligne, Facture, LigneFacture, Abonnement, LigneAbon
 
 logger = logging.getLogger("api_v2.import_csv")
 
+MONTANT_FIELDS = ("abo", "conso", "remises", "achat")
+CONFLIT_EPSILON = 0.01
+
+
+def _as_amount(value: Any) -> float:
+    try:
+        amount = round(float(value or 0), 2)
+    except Exception:
+        amount = 0.0
+    return 0.0 if abs(amount) < 0.005 else amount
+
+
+def _amounts_from_obj(source: Any) -> Dict[str, float]:
+    return {field: _as_amount(getattr(source, field, 0)) for field in MONTANT_FIELDS}
+
+
+def _amounts_from_dict(source: Optional[Dict[str, Any]]) -> Dict[str, float]:
+    data = source or {}
+    return {field: _as_amount(data.get(field, 0)) for field in MONTANT_FIELDS}
+
+
+def _compute_delta(ancien: Dict[str, float], nouveau: Dict[str, float]) -> Dict[str, float]:
+    return {field: _as_amount(nouveau.get(field, 0) - ancien.get(field, 0)) for field in MONTANT_FIELDS}
+
+
+def _has_conflict(delta: Dict[str, float]) -> bool:
+    return any(abs(delta.get(field, 0)) > CONFLIT_EPSILON for field in MONTANT_FIELDS)
+
 
 # ===================== PARSING / MAPPING =====================
 
@@ -241,44 +269,24 @@ def _normalize_text(*parts: str) -> str:
 
 
 def categorize_montant(ligne: Dict) -> str:
-    info = _normalize_text(
-        ligne.get("niveauCharge") or "",
-        ligne.get("typeCharge") or "",
-        ligne.get("libelleDetail") or "",
-        ligne.get("rubriqueFacture") or "",
-        ligne.get("typeLabel") or "",
-    )
     rubrique = _normalize_text(ligne.get("rubriqueFacture") or "")
     montant = ligne.get("montantHT") or 0
     is_negative = montant < 0
-    is_remise_keyword = is_negative or any(k in info for k in ["remise", "avoir", "credit", "rembourse", "rabais", "geste commercial"])
 
-    base = None
-    if rubrique:
-        if any(k in rubrique for k in ["conso", "consommation", "usage", "trafic"]):
-            base = "conso"
-        elif any(k in rubrique for k in ["achat", "terminal", "equipement", "appareil", "device", "service ponctuel", "services ponctuels"]):
-            base = "achat"
-        elif any(k in rubrique for k in ["forfait", "formule", "option", "abonnement", "offre"]):
-            base = "abo"
+    if any(k in rubrique for k in ["consommations"]):
+        # Les consommations negatives restent dans conso (pas en remises)
+        return "conso"
 
-    if base:
-        if base in ("abo", "conso") and is_remise_keyword:
-            return "remises"
-        return base
-
-    has_conso = any(k in info for k in ["conso", "consommation", "usage", "hors forfait", "communication", "appel", "voix", "sms", "mms", "data", "internet", "trafic", "roaming"])
-    has_forfait = any(k in info for k in ["abo", "abonnement", "forfait", "mensuel", "frais fixe", "pack", "offre", "option", "formule"])
-    achat_words = any(k in info for k in ["achat", "terminal", "equipement", "appareil", "device", "box", "modem", "routeur", "paiement", "location", "service ponctuel", "services ponctuels"])
-    has_smartphone = "smartphone" in info
-
-    if has_conso:
-        return "remises" if is_remise_keyword else "conso"
-    if achat_words and (not has_smartphone):
+    if any(k in rubrique for k in ["ponctuels", "terminaux"]):
+        # Les achats negatifs restent dans achat (pas en remises)
         return "achat"
-    if has_forfait or has_smartphone:
-        return "remises" if is_remise_keyword else "abo"
-    return "remises" if is_remise_keyword else "abo"
+
+    if any(k in rubrique for k in ["abonnements", "forfaits", "remises"]):
+        # Les remises ne concernent que les depenses d'abonnement negatives
+        return "remises" if is_negative else "abo"
+
+    # Fallback: sans rubrique reconnue, on classe en abo sans bascule automatique vers remises.
+    return "abo"
 
 
 def aggregate_factures_data(rows_data: List[Dict]) -> List[Dict]:
@@ -417,6 +425,7 @@ def run_import(
     format_cfg: Dict,
     confirmed_accounts: Optional[Dict[str, Dict]] = None,
     confirmed_abos: Optional[List[Dict[str, Any]]] = None,
+    confirmed_conflicts: Optional[List[Dict[str, Any]]] = None,
     analyze_abos: Optional[Dict[str, Any]] = None,
     dry_run: bool = False,
     upload_id: Optional[str] = None,
@@ -505,6 +514,86 @@ def run_import(
             if val["count_lignes"] > 0:
                 suggestions_abos.append(val)
 
+    # Cache factures existantes (sur comptes deja existants), utilise aussi pour detecter les conflits en dry-run
+    factures_existantes: List[Facture] = []
+    if comptes_map:
+        factures_existantes = db.query(Facture).filter(Facture.compte_id.in_([c.id for c in comptes_map.values()])).all()
+    factures_set = {f"{f.num}|{f.compte_id}|{f.date}": f for f in factures_existantes}
+
+    lignes_factures_by_facture: Dict[int, List[Dict[str, Any]]] = {}
+    if factures_existantes:
+        facture_ids = [f.id for f in factures_existantes]
+        rows_lf = (
+            db.query(LigneFacture, Ligne)
+            .join(Ligne, LigneFacture.ligne_id == Ligne.id)
+            .filter(LigneFacture.facture_id.in_(facture_ids))
+            .all()
+        )
+        for lf, ligne in rows_lf:
+            lignes_factures_by_facture.setdefault(lf.facture_id, []).append({"lf": lf, "ligne": ligne})
+
+    conflits: List[Dict[str, Any]] = []
+    conflict_facture_ids: set[int] = set()
+    for facture_data in factures_agregees:
+        compte = comptes_map.get(facture_data["numeroCompte"])
+        if not compte:
+            continue
+        facture_key = f"{facture_data['numeroFacture']}|{compte.id}|{facture_data['date']}"
+        facture_existante = factures_set.get(facture_key)
+        if not facture_existante:
+            continue
+
+        ancien_facture = _amounts_from_obj(facture_existante)
+        nouveau_facture = _amounts_from_dict(facture_data)
+        delta_facture = _compute_delta(ancien_facture, nouveau_facture)
+        if not _has_conflict(delta_facture):
+            continue
+
+        csv_lignes_par_numero: Dict[str, Dict[str, Any]] = {}
+        for ligne_data in facture_data.get("lignes", []):
+            numero_acces = str((ligne_data or {}).get("numeroAcces") or "").strip()
+            if numero_acces:
+                csv_lignes_par_numero[numero_acces] = ligne_data
+
+        lignes_conflit: List[Dict[str, Any]] = []
+        for item in lignes_factures_by_facture.get(facture_existante.id, []):
+            lf: LigneFacture = item["lf"]
+            ligne: Ligne = item["ligne"]
+            numero_ligne = str(ligne.num or "").strip()
+            csv_ligne = csv_lignes_par_numero.get(numero_ligne)
+
+            ancien_ligne = _amounts_from_obj(lf)
+            nouveau_ligne = _amounts_from_dict(csv_ligne) if csv_ligne else dict(ancien_ligne)
+            delta_ligne = _compute_delta(ancien_ligne, nouveau_ligne)
+
+            lignes_conflit.append(
+                {
+                    "ligne_facture_id": lf.id,
+                    "ligne_num": numero_ligne,
+                    "ligne_nom": (ligne.nom or (csv_ligne or {}).get("nomLigne") or "").strip(),
+                    "statut_actuel": int(lf.statut or 0),
+                    "ancien": ancien_ligne,
+                    "nouveau": nouveau_ligne,
+                    "delta": delta_ligne,
+                }
+            )
+
+        conflits.append(
+            {
+                "facture_id": facture_existante.id,
+                "num": str(facture_existante.num),
+                "compte_num": str(compte.num),
+                "compte_nom": (compte.nom or "").strip(),
+                "date": facture_existante.date.isoformat() if facture_existante.date else str(facture_data.get("date") or ""),
+                "statut_actuel": int(facture_existante.statut or 0),
+                "ancien": ancien_facture,
+                "nouveau": nouveau_facture,
+                "delta": delta_facture,
+                "lignes": lignes_conflit,
+            }
+        )
+        conflict_facture_ids.add(facture_existante.id)
+
     if comptes_a_creer and (not confirmed_accounts or not all(n in confirmed_accounts for n in comptes_a_creer)):
         return {
             "status": "requires_account_confirmation",
@@ -521,6 +610,7 @@ def run_import(
             "date_min": date_min,
             "date_max": date_max,
             "abonnements_suggeres": suggestions_abos,
+            "conflits": conflits,
         }
 
     if dry_run:
@@ -537,6 +627,7 @@ def run_import(
             "date_min": date_min,
             "date_max": date_max,
             "abonnements_suggeres": suggestions_abos,
+            "conflits": conflits,
         }
 
     stats = {
@@ -549,6 +640,7 @@ def run_import(
         "abonnements_crees": 0,
         "lignes_abonnements_creees": 0,
         "factures_doublons": 0,
+        "factures_mises_a_jour": 0,
         "erreurs": 0,
         "factures_prevues": factures_prevues,
         "lignes_factures_prevues": lignes_factures_prevues,
@@ -572,9 +664,6 @@ def run_import(
             errors.append(f"Compte {num}: {exc}")
             stats["erreurs"] += 1
 
-    # Cache factures existantes
-    factures_existantes = db.query(Facture).filter(Facture.compte_id.in_([c.id for c in comptes_map.values()])).all()
-    factures_set = {f"{f.num}|{f.compte_id}|{f.date}": f for f in factures_existantes}
     lignes_cache: Dict[Tuple[int, str], Ligne] = {}
 
     # Creation factures et lignes_factures
@@ -586,6 +675,9 @@ def run_import(
             continue
         facture_key = f"{facture_data['numeroFacture']}|{compte.id}|{facture_data['date']}"
         if facture_key in factures_set:
+            facture_existante = factures_set.get(facture_key)
+            if facture_existante and facture_existante.id in conflict_facture_ids:
+                continue
             stats["factures_doublons"] += 1
             continue
         try:
@@ -647,6 +739,79 @@ def run_import(
                 stats["lignes_factures_creees"],
                 lignes_factures_prevues,
             )
+
+    # Application des conflits confirms (mise a jour de factures existantes + lignes associees)
+    if confirmed_conflicts is not None and not dry_run:
+        try:
+            for conflict in confirmed_conflicts:
+                if not isinstance(conflict, dict):
+                    continue
+                if not conflict.get("accept"):
+                    continue
+
+                facture_id = conflict.get("facture_id")
+                if facture_id is None:
+                    continue
+                try:
+                    facture_id_int = int(facture_id)
+                except Exception:
+                    continue
+
+                facture = db.query(Facture).filter(Facture.id == facture_id_int).first()
+                if not facture:
+                    continue
+
+                nouveau_facture_payload = conflict.get("nouveau")
+                nouveau_facture = (
+                    _amounts_from_dict(nouveau_facture_payload)
+                    if isinstance(nouveau_facture_payload, dict)
+                    else _amounts_from_obj(facture)
+                )
+                facture.abo = Decimal(str(_as_amount(nouveau_facture["abo"])))
+                facture.conso = Decimal(str(_as_amount(nouveau_facture["conso"])))
+                facture.remises = Decimal(str(_as_amount(nouveau_facture["remises"])))
+                facture.achat = Decimal(str(_as_amount(nouveau_facture["achat"])))
+
+                reset_statut = bool(conflict.get("reset_statut"))
+                if reset_statut:
+                    facture.statut = 0
+                db.add(facture)
+
+                lignes_payload = conflict.get("lignes") or []
+                lignes_payload_map: Dict[int, Dict[str, Any]] = {}
+                for lc in lignes_payload:
+                    if not isinstance(lc, dict):
+                        continue
+                    try:
+                        lf_id = int(lc.get("ligne_facture_id"))
+                    except Exception:
+                        continue
+                    lignes_payload_map[lf_id] = lc
+
+                lignes_facture_db = db.query(LigneFacture).filter(LigneFacture.facture_id == facture.id).all()
+                for lf in lignes_facture_db:
+                    payload_ligne = lignes_payload_map.get(int(lf.id))
+                    if payload_ligne:
+                        nouveau_ligne_payload = payload_ligne.get("nouveau")
+                        nouveau_ligne = (
+                            _amounts_from_dict(nouveau_ligne_payload)
+                            if isinstance(nouveau_ligne_payload, dict)
+                            else _amounts_from_obj(lf)
+                        )
+                        lf.abo = Decimal(str(_as_amount(nouveau_ligne["abo"])))
+                        lf.conso = Decimal(str(_as_amount(nouveau_ligne["conso"])))
+                        lf.remises = Decimal(str(_as_amount(nouveau_ligne["remises"])))
+                        lf.achat = Decimal(str(_as_amount(nouveau_ligne["achat"])))
+                    if reset_statut:
+                        lf.statut = 0
+                    db.add(lf)
+
+                stats["factures_mises_a_jour"] = stats.get("factures_mises_a_jour", 0) + 1
+            db.commit()
+        except Exception as exc:  # pragma: no cover - defensive
+            db.rollback()
+            errors.append(f"Mise a jour conflits: {exc}")
+            stats["erreurs"] += 1
 
     # Creation abonnements selectionnes et liens lignes
     if confirmed_abos and not dry_run:
@@ -713,6 +878,7 @@ def run_import(
         "date_min": date_min,
         "date_max": date_max,
         "abonnements_suggeres": suggestions_abos,
+        "conflits": conflits,
     }
 
 

@@ -80,6 +80,7 @@ async def import_csv_usecase(
     format: str | None = Form(None),
     confirmed_accounts: str | None = Form(None),
     confirmed_abos: str | None = Form(None),
+    confirmed_conflicts: str | None = Form(None),
     analyze_abos: str | None = Form(None),
     dry_run: bool = Form(False),
     db: Session = Depends(get_db),
@@ -120,6 +121,13 @@ async def import_csv_usecase(
         except Exception as exc:  # pragma: no cover - defensive
             raise HTTPException(status_code=400, detail=f"confirmed_abos invalide: {exc}") from exc
 
+    confirmed_conflicts_list = None
+    if confirmed_conflicts:
+        try:
+            confirmed_conflicts_list = json.loads(confirmed_conflicts) or []
+        except Exception as exc:  # pragma: no cover - defensive
+            raise HTTPException(status_code=400, detail=f"confirmed_conflicts invalide: {exc}") from exc
+
     analyze_abos_cfg = None
     if analyze_abos:
         try:
@@ -158,6 +166,7 @@ async def import_csv_usecase(
         format_cfg=format_cfg,
         confirmed_accounts=confirmed_map,
         confirmed_abos=confirmed_abos_list,
+        confirmed_conflicts=confirmed_conflicts_list,
         analyze_abos=analyze_abos_cfg,
         dry_run=dry_run,
         upload_id=upload_id,

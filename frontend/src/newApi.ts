@@ -238,6 +238,7 @@ export interface ImportCsvResponse {
   date_min?: string | null;
   date_max?: string | null;
   abonnements_suggeres?: { nom: string; prix: number; numeroCompte?: string; numeroAcces?: string | null; numeroFacture?: string; date?: string; typeCode?: number | null }[];
+  conflits?: any[];
 }
 
 export async function importCsvBackend(params: {
@@ -246,6 +247,16 @@ export async function importCsvBackend(params: {
   format?: any;
   confirmedAccounts?: { num: string; nom?: string; lot?: string }[];
   confirmedAbos?: { nom: string; prix: number }[];
+  confirmedConflicts?: {
+    facture_id: number;
+    accept: boolean;
+    reset_statut: boolean;
+    nouveau: { abo: number; conso: number; remises: number; achat: number };
+    lignes: Array<{
+      ligne_facture_id: number;
+      nouveau: { abo: number; conso: number; remises: number; achat: number };
+    }>;
+  }[];
   analyzeAbos?: { enabled: boolean; types?: number[] };
   dryRun?: boolean;
 }): Promise<ImportCsvResponse> {
@@ -258,6 +269,9 @@ export async function importCsvBackend(params: {
   }
   if (params.confirmedAbos && params.confirmedAbos.length > 0) {
     form.append("confirmed_abos", JSON.stringify(params.confirmedAbos));
+  }
+  if (params.confirmedConflicts) {
+    form.append("confirmed_conflicts", JSON.stringify(params.confirmedConflicts));
   }
   if (params.analyzeAbos) {
     form.append("analyze_abos", JSON.stringify(params.analyzeAbos));

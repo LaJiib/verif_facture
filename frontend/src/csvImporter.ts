@@ -23,6 +23,40 @@ export interface AboSuggere {
   numeroAcces_list?: string[];
 }
 
+export interface ConflitLigne {
+  ligne_facture_id: number;
+  ligne_num: string;
+  ligne_nom: string;
+  statut_actuel: number;
+  ancien: { abo: number; conso: number; remises: number; achat: number };
+  nouveau: { abo: number; conso: number; remises: number; achat: number };
+  delta: { abo: number; conso: number; remises: number; achat: number };
+}
+
+export interface ConflitFacture {
+  facture_id: number;
+  num: string;
+  compte_num: string;
+  compte_nom: string;
+  date: string;
+  statut_actuel: number;
+  ancien: { abo: number; conso: number; remises: number; achat: number };
+  nouveau: { abo: number; conso: number; remises: number; achat: number };
+  delta: { abo: number; conso: number; remises: number; achat: number };
+  lignes: ConflitLigne[];
+}
+
+export interface ConflitDecision {
+  facture_id: number;
+  accept: boolean;
+  reset_statut: boolean;
+  nouveau: { abo: number; conso: number; remises: number; achat: number };
+  lignes: Array<{
+    ligne_facture_id: number;
+    nouveau: { abo: number; conso: number; remises: number; achat: number };
+  }>;
+}
+
 export interface ImportResult {
   success: boolean;
   stats: {
@@ -34,11 +68,13 @@ export interface ImportResult {
     abonnements_crees?: number;
     lignes_abonnements_creees?: number;
     factures_doublons: number;
+    factures_mises_a_jour?: number;
     erreurs: number;
   };
   errors: string[];
   comptesACreer?: CompteACreer[];
   abonnementsSuggeres?: AboSuggere[];
+  conflits?: ConflitFacture[];
 }
 
 export async function analyzeCSV(
@@ -46,7 +82,7 @@ export async function analyzeCSV(
   entrepriseId: number,
   format?: CsvFormatConfig,
   analyzeAbos?: { enabled: boolean; types?: number[] }
-): Promise<{ comptesACreer: CompteACreer[]; lignes_csv: number; abonnementsSuggeres: AboSuggere[] }> {
+): Promise<{ comptesACreer: CompteACreer[]; lignes_csv: number; abonnementsSuggeres: AboSuggere[]; conflits: ConflitFacture[] }> {
   const formatToUse = format || DEFAULT_CSV_FORMAT;
   const res = await importCsvBackend({
     entrepriseId,
@@ -59,6 +95,7 @@ export async function analyzeCSV(
     comptesACreer: res.comptes_a_creer || [],
     lignes_csv: res.stats?.lignes_csv || 0,
     abonnementsSuggeres: res.abonnements_suggeres || [],
+    conflits: (res.conflits || []) as ConflitFacture[],
   };
 }
 
@@ -70,7 +107,8 @@ export async function importCSV(
   comptesOverrides?: CompteACreer[],
   analyzeAbos?: { enabled: boolean; types?: number[] },
   abosSelectionnes?: AboSuggere[],
-  onProgress?: (stage: string, percent: number) => void
+  onProgress?: (stage: string, percent: number) => void,
+  confirmedConflicts?: ConflitDecision[]
 ): Promise<ImportResult> {
   const formatToUse = format || DEFAULT_CSV_FORMAT;
   let progressTimer: ReturnType<typeof setInterval> | null = null;
@@ -86,6 +124,7 @@ export async function importCSV(
       abonnements_crees: 0,
       lignes_abonnements_creees: 0,
       factures_doublons: 0,
+      factures_mises_a_jour: 0,
       erreurs: 0,
     },
     errors: [],
@@ -109,11 +148,14 @@ export async function importCSV(
       confirmedAccounts: confirmed,
       analyzeAbos,
       confirmedAbos: abosSelectionnes,
+      confirmedConflicts,
     });
 
     if (response.status === "requires_account_confirmation") {
       result.comptesACreer = response.comptes_a_creer;
       result.stats.lignes_csv = response.stats?.lignes_csv || 0;
+      result.abonnementsSuggeres = response.abonnements_suggeres || [];
+      result.conflits = (response.conflits || []) as ConflitFacture[];
       result.errors.push("Comptes a confirmer");
       return result;
     }
@@ -125,6 +167,7 @@ export async function importCSV(
     result.errors = response.errors || [];
     result.success = response.status === "success" && result.errors.length === 0;
     result.abonnementsSuggeres = response.abonnements_suggeres || [];
+    result.conflits = (response.conflits || []) as ConflitFacture[];
     const facturesPrevues = response.stats?.factures_prevues ?? response.stats?.factures_agregees;
     const lignesPrevues = response.stats?.lignes_prevues;
     const lignesFactPrevues = response.stats?.lignes_factures_prevues;
