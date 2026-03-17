@@ -599,6 +599,7 @@ export default function EntreprisePage({
                   padding: "0.65rem 0.75rem",
                   borderRadius: "0.6rem",
                   cursor: "pointer",
+                  color: "#111827",
                 }}
               >
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>

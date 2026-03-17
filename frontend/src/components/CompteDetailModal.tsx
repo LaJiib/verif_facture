@@ -182,6 +182,12 @@ const statutTokens: Record<StatutValeur, { bg: string; color: string; label: str
   a_verifier: { bg: "#f3f4f6", color: "#374151", label: "A verifier" },
 };
 
+function statutIntToValeur(statut: number | null | undefined): StatutValeur {
+  if (statut === 1) return "valide";
+  if (statut === 2) return "conteste";
+  return "a_verifier";
+}
+
 function StatutBadge({ value }: { value: StatutValeur }) {
   const token = statutTokens[value];
   return (
@@ -2129,19 +2135,7 @@ export default function CompteDetailModal({
                               {facture.facture_date}
                             </td>
                                 <td style={{ padding: "0.75rem" }}>
-                                  <span
-                                    style={{
-                                      display: "inline-block",
-                                      padding: "0.25rem 0.5rem",
-                                      borderRadius: "0.35rem",
-                                      background: "#eef2ff",
-                                      color: "#4338ca",
-                                      fontWeight: 600,
-                                      fontSize: "0.85rem",
-                                    }}
-                                  >
-                                {decodeFactureStatus(facture.facture_statut)}
-                                  </span>
+                                  <StatutBadge value={statutIntToValeur(facture.facture_statut)} />
                                 </td>
                               <td style={{ padding: "0.75rem", textAlign: "right" }}>
                               {Number(facture.abo || 0).toFixed(2)} € 
@@ -2499,7 +2493,7 @@ export default function CompteDetailModal({
                                 })()}
                               </div>
                             </td>
-                            <td style={{ padding: "0.75rem", color: "#374151" }}>{decodeLigneFactureStatus(ligne.ligne_statut)}</td>
+                            <td style={{ padding: "0.75rem" }}><StatutBadge value={statutIntToValeur(ligne.ligne_statut)} /></td>
                             <td
                               style={{ padding: "0.75rem", color: "#0f172a", cursor: "pointer" }}
                               onClick={() => openAboFromLine(ligne)}
@@ -2680,6 +2674,7 @@ export default function CompteDetailModal({
                                 border: isActive ? "1px solid #2563eb" : "1px solid #e5e7eb",
                                 background: isActive ? "#eff6ff" : "#f9fafb",
                                 cursor: "pointer",
+                                color: "#0f172a",
                                 display: "flex",
                                 justifyContent: "space-between",
                                 alignItems: "center",

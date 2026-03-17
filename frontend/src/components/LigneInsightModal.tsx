@@ -195,6 +195,20 @@ export default function LigneInsightModal({ ligneId, onClose }: LigneInsightModa
                           </div>
                           <div style={{ fontSize: "0.85rem", color: "#111827", fontWeight: 700 }}>{total.toFixed(2)}€</div>
                           <div style={{ fontSize: "0.8rem", color: "#6b7280" }}>{f.date.slice(0, 7)}</div>
+                          <span style={{
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        gap: "0.25rem",
+                                        padding: "0.15rem 0.45rem",
+                                        borderRadius: "999px",
+                                        fontSize: "0.72rem",
+                                        fontWeight: 700,
+                                        background: f.ligne_statut === 1 ? "#ecfdf3" : f.ligne_statut === 2 ? "#fef2f2" : "#f3f4f6",
+                                        color: statutColor,
+                                      }}>
+                              <span style={{ width: 6, height: 6, borderRadius: "999px", background: statutColor, display: "inline-block" }} />
+                                  {f.ligne_statut === 1 ? "Validée" : f.ligne_statut === 2 ? "Contestée" : "Importée"}
+                          </span>
                           <select
                             value={f.ligne_statut}
                             disabled={savingStatutId === f.ligne_facture_id}
