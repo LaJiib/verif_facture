@@ -79,6 +79,7 @@ interface FactureDetail {
 
 interface DetailLigne {
   ligne_id: number;
+  ligne_facture_id: number;
   ligne_num: string;
   ligne_type: number;
   ligne_nom: string;
@@ -611,6 +612,7 @@ export default function CompteDetailModal({
       const lignesRaw = detailStats.facture_detail.lignes || [];
       const lignes: DetailLigne[] = lignesRaw.map((l) => ({
         ligne_id: l.ligne_id,
+        ligne_facture_id: l.ligne_facture_id,
         ligne_num: l.ligne_num,
         ligne_nom: (l as any).nom ?? null,
         ligne_type: l.ligne_type,
@@ -725,6 +727,7 @@ export default function CompteDetailModal({
       // 7) Lignes précédentes (Record -> liste)
       const prevList: DetailLigne[] = Object.entries(detailStats.lignes_by_id || {}).map(([id, v]) => ({
         ligne_id: Number(id),
+        ligne_facture_id: 0, // non disponible dans lignes_by_id, non utilisé pour les lignes précédentes
         ligne_num: String(id),
         ligne_nom: (v as any).nom ?? null,
         ligne_type: (v as any).ligne_type ?? 3,
@@ -772,6 +775,17 @@ export default function CompteDetailModal({
         const unitNet = g.count ? g.netAbo / g.count : 0;
         return { ...g, prix_abo: unitNet, match_net: unitNet };
       });
+// Construit la map groupKey → ligne_facture_ids depuis lignesRaw (même logique que le backend)
+      const lfIdsByGroupKey: Record<string, number[]> = {};
+      lignesRaw.forEach((l) => {
+        const netUnit = Number((l.abo + l.remises).toFixed(2));
+        const key = l.abo_id_ref
+          ? `abo|${l.abo_id_ref}|${l.ligne_type}|${netUnit.toFixed(2)}`
+          : `price|${l.ligne_type}|${netUnit.toFixed(2)}`;
+        if (!lfIdsByGroupKey[key]) lfIdsByGroupKey[key] = [];
+        lfIdsByGroupKey[key].push(l.ligne_facture_id);
+      });
+
       if ((detailStats as any).ligne_groupes?.length) {
         const fromBackend = (detailStats as any).ligne_groupes as BackendLigneGroupe[];
         setFactureLigneGroupes(
@@ -792,11 +806,14 @@ export default function CompteDetailModal({
             achat: g.achat,
             abo_nom: g.abo_nom_ref,
             abo_id: g.abo_id_ref,
-            ligne_facture_ids: g.ligne_facture_ids || [],
+            ligne_facture_ids: lfIdsByGroupKey[g.group_key] ?? g.ligne_facture_ids ?? [],
           }))
         );
       } else {
-        setFactureLigneGroupes(groupes);
+        setFactureLigneGroupes(groupes.map((g) => ({
+          ...g,
+          ligne_facture_ids: lfIdsByGroupKey[g.group_key] ?? [],
+        })));
       }
     } catch (err) {
       console.error("Erreur lors du chargement des donnees detaillees", err);
@@ -1358,11 +1375,10 @@ export default function CompteDetailModal({
       },
     }));
 
-    // Trouve les ligne_facture_ids du groupe
+// Propage le statut aux lignes du groupe via ligne_facture_ids
     const group = ligneGroupesFacture.find((g) => g.facture_id === factureId && g.group_key === groupKey);
-    const lfIds: number[] = (group as any)?.ligne_facture_ids || [];
+    const lfIds: number[] = group?.ligne_facture_ids ?? [];
 
-    // Met à jour factureLineStatuts pour toutes les lignes du groupe
     if (lfIds.length > 0) {
       setFactureLineStatuts((prev) => {
         const current = prev[factureId] || {};

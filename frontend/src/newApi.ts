@@ -426,6 +426,7 @@ export interface FactureDetailStats {
     conso: number;
     achat: number;
     total: number;
+    ligne_facture_ids?: number[];
   }[];
   factures_resume?: {
     facture_id: number;
