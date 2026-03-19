@@ -28,6 +28,13 @@ export interface AutoVerificationResult {
   groupStatuts: Record<string, { aboNet: StatutValeur; achat: StatutValeur }>;
   groupComments: Record<string, { aboNet?: string; achat?: string }>;
   groupAnomalies: Record<string, LigneAnomalie[]>;
+  groups: Array<{
+    groupKey: string;
+    ligneFactureIds: number[];
+    statut: { aboNet: StatutValeur; achat: StatutValeur };
+    comments: { aboNet?: string; achat?: string };
+    anomalies: LigneAnomalie[];
+  }>;
   lineStatuts: Record<number, { aboNet: StatutValeur; achat: StatutValeur; comment?: string }>;
   summary: { added: number; removed: number; modified: number; previousFactureId: number | null; previousFactureNum?: string | null };
 }
@@ -64,6 +71,18 @@ function mapResult(res: AutoVerifFullResult): AutoVerificationResult {
   Object.entries(res.groupAnomalies || {}).forEach(([key, anomalies]) => {
     groupAnomalies[key] = (anomalies as any[]).map(coerceAnomalie);
   });
+  const groups: AutoVerificationResult["groups"] = Array.isArray(res.groups)
+    ? res.groups.map((group) => ({
+        groupKey: String(group.groupKey || ""),
+        ligneFactureIds: Array.isArray(group.ligneFactureIds) ? group.ligneFactureIds.map((id) => Number(id)) : [],
+        statut: {
+          aboNet: coerceStatut(group.statut?.aboNet),
+          achat: coerceStatut(group.statut?.achat),
+        },
+        comments: group.comments || {},
+        anomalies: Array.isArray(group.anomalies) ? group.anomalies.map(coerceAnomalie) : [],
+      }))
+    : [];
   const lineStatuts: AutoVerificationResult["lineStatuts"] = {};
   Object.entries(res.lineStatuts || {}).forEach(([id, val]) => {
     lineStatuts[Number(id)] = {
@@ -79,6 +98,7 @@ function mapResult(res: AutoVerifFullResult): AutoVerificationResult {
     groupStatuts,
     groupComments: res.groupComments || {},
     groupAnomalies,
+    groups,
     lineStatuts,
     summary: res.summary as AutoVerificationResult["summary"],
   };

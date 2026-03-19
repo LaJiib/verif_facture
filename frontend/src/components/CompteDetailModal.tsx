@@ -378,6 +378,71 @@ export default function CompteDetailModal({
     return `${moisMap[month]} ${year}`;
   }
 
+  function mapGroupsToLegacyMaps(
+    groupsInput: any,
+    fallbackStatuts: Record<string, { aboNet: StatutValeur; achat: StatutValeur }> = {},
+    fallbackComments: Record<string, { aboNet?: string; achat?: string }> = {},
+    fallbackAnomalies: Record<string, LigneAnomalie[]> = {}
+  ): {
+    groupStatuts: Record<string, { aboNet: StatutValeur; achat: StatutValeur }>;
+    groupComments: Record<string, { aboNet?: string; achat?: string }>;
+    groupAnomalies: Record<string, LigneAnomalie[]>;
+  } {
+    const makeSignature = (ids: number[]) =>
+      [...(ids || [])]
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id))
+        .sort((a, b) => a - b)
+        .join(",");
+
+    const signatureToCurrentKey = new Map<string, string>();
+    ligneGroupesFacture.forEach((g) => {
+      const sig = makeSignature(g.ligne_facture_ids || []);
+      if (sig) signatureToCurrentKey.set(sig, g.group_key);
+    });
+
+    const outStatuts: Record<string, { aboNet: StatutValeur; achat: StatutValeur }> = { ...(fallbackStatuts || {}) };
+    const outComments: Record<string, { aboNet?: string; achat?: string }> = { ...(fallbackComments || {}) };
+    const outAnomalies: Record<string, LigneAnomalie[]> = { ...(fallbackAnomalies || {}) };
+
+    const coerceStatut = (value: any): StatutValeur => {
+      if (value === "valide" || value === "conteste" || value === "a_verifier") return value;
+      return "a_verifier";
+    };
+
+    if (!Array.isArray(groupsInput)) {
+      return { groupStatuts: outStatuts, groupComments: outComments, groupAnomalies: outAnomalies };
+    }
+
+    groupsInput.forEach((groupItem: any) => {
+      const lfIdsRaw = groupItem?.ligneFactureIds ?? groupItem?.ligne_facture_ids;
+      const lfIds = Array.isArray(lfIdsRaw) ? lfIdsRaw.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id)) : [];
+      const signature = makeSignature(lfIds);
+
+      const rawKey = typeof groupItem?.groupKey === "string" ? groupItem.groupKey : typeof groupItem?.group_key === "string" ? groupItem.group_key : "";
+      const key = (signature ? signatureToCurrentKey.get(signature) : undefined) || rawKey;
+      if (!key) return;
+
+      const statutRaw = groupItem?.statut || groupItem?.statuts || {};
+      outStatuts[key] = {
+        aboNet: coerceStatut(statutRaw?.aboNet),
+        achat: coerceStatut(statutRaw?.achat),
+      };
+
+      const commentsRaw = groupItem?.comments || groupItem?.commentaires || {};
+      outComments[key] = {
+        aboNet: commentsRaw?.aboNet,
+        achat: commentsRaw?.achat,
+      };
+
+      if (Array.isArray(groupItem?.anomalies)) {
+        outAnomalies[key] = groupItem.anomalies;
+      }
+    });
+
+    return { groupStatuts: outStatuts, groupComments: outComments, groupAnomalies: outAnomalies };
+  }
+
   async function applyAutoVerification() {
     if (!factureCourante) return;
     try {
@@ -391,15 +456,21 @@ export default function CompteDetailModal({
       const autoResult = await runAutoVerification({
         factureId: factureCourante.facture_id,
       });
+      const mappedGroups = mapGroupsToLegacyMaps(
+        autoResult.groups,
+        autoResult.groupStatuts,
+        autoResult.groupComments,
+        autoResult.groupAnomalies
+      );
 
       setFactureStatuts((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.metricStatuts }));
       setFactureMetricComments((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.metricComments }));
       setFactureMetricReals((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.metricReals }));
-      setFactureGroupStatuts((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.groupStatuts }));
-      setFactureGroupComments((prev) => ({ ...prev, [factureCourante.facture_id]: autoResult.groupComments }));
+      setFactureGroupStatuts((prev) => ({ ...prev, [factureCourante.facture_id]: mappedGroups.groupStatuts }));
+      setFactureGroupComments((prev) => ({ ...prev, [factureCourante.facture_id]: mappedGroups.groupComments }));
       setFactureGroupAnomalies((prev) => ({
         ...prev,
-        [factureCourante.facture_id]: autoResult.groupAnomalies,
+        [factureCourante.facture_id]: mappedGroups.groupAnomalies,
       }));
       setFactureLineStatuts((prev) => ({
         ...prev,
@@ -1254,27 +1325,27 @@ export default function CompteDetailModal({
         if (rapport) {
           setFactureCommentaires((prev) => ({ ...prev, [selectedFactureId]: rapport.commentaire || "" }));
           const data = rapport.data || {};
+          const mappedGroups = mapGroupsToLegacyMaps(
+            data.groups,
+            data.groupStatuts || {},
+            data.groupComments || {},
+            data.groupAnomalies || {}
+          );
           if (data.metricStatuts) {
             setFactureStatuts((prev) => ({ ...prev, [selectedFactureId]: data.metricStatuts }));
           }
-          if (data.groupStatuts) {
-            setFactureGroupStatuts((prev) => ({ ...prev, [selectedFactureId]: data.groupStatuts }));
-          }
+          setFactureGroupStatuts((prev) => ({ ...prev, [selectedFactureId]: mappedGroups.groupStatuts }));
           if (data.metricComments) {
             setFactureMetricComments((prev) => ({ ...prev, [selectedFactureId]: data.metricComments }));
           }
-          if (data.groupComments) {
-            setFactureGroupComments((prev) => ({ ...prev, [selectedFactureId]: data.groupComments }));
-          }
+          setFactureGroupComments((prev) => ({ ...prev, [selectedFactureId]: mappedGroups.groupComments }));
           if (data.metricReals) {
             setFactureMetricReals((prev) => ({ ...prev, [selectedFactureId]: data.metricReals }));
           }
           if (data.groupReals) {
             setFactureGroupReals((prev) => ({ ...prev, [selectedFactureId]: data.groupReals }));
           }
-          if (data.groupAnomalies) {
-            setFactureGroupAnomalies((prev) => ({ ...prev, [selectedFactureId]: data.groupAnomalies }));
-          }
+          setFactureGroupAnomalies((prev) => ({ ...prev, [selectedFactureId]: mappedGroups.groupAnomalies }));
           if (data.lineStatuts) {
             setFactureLineStatuts((prev) => ({ ...prev, [selectedFactureId]: data.lineStatuts }));
           }
@@ -1364,12 +1435,16 @@ export default function CompteDetailModal({
     key: "aboNet" | "achat",
     value: StatutValeur
   ) {
+    const resolvedCurrent = resolvedGroupRows.find((row) => row.key === groupKey)?.stat || {
+      aboNet: "a_verifier",
+      achat: "a_verifier",
+    };
     setFactureGroupStatuts((prev) => ({
       ...prev,
       [factureId]: {
         ...(prev[factureId] || {}),
         [groupKey]: {
-          ...(prev[factureId]?.[groupKey] || { aboNet: "a_verifier", achat: "a_verifier" }),
+          ...(prev[factureId]?.[groupKey] || resolvedCurrent),
           [key]: value,
         },
       },
@@ -1384,7 +1459,10 @@ export default function CompteDetailModal({
         const current = prev[factureId] || {};
         const updated = { ...current };
         lfIds.forEach((id) => {
-          updated[id] = { ...(current[id] || { aboNet: "a_verifier", achat: "a_verifier" }), [key]: value };
+          updated[id] = {
+            ...(current[id] || resolvedCurrent),
+            [key]: value,
+          };
         });
         return { ...prev, [factureId]: updated };
       });
@@ -1650,11 +1728,25 @@ export default function CompteDetailModal({
     }
 
     const finalGroupAbonnements = { ...groupAbos, ...attachedSelections };
+    const groupsPayload = resolvedGroupRows.map((row) => ({
+      groupKey: row.key,
+      ligneFactureIds: (row.group as any).ligne_facture_ids || [],
+      statut: {
+        aboNet: row.stat?.aboNet || "a_verifier",
+        achat: row.stat?.achat || "a_verifier",
+      },
+      comments: {
+        aboNet: row.comment?.aboNet,
+        achat: row.comment?.achat,
+      },
+      anomalies: row.anomalies || [],
+    }));
     const payload = {
       facture_id: selectedFactureId,
       commentaire: factureCommentaires[selectedFactureId] || null,
       data: {
         metricStatuts: { ecart: factureStatuts[selectedFactureId]?.ecart || "a_verifier" },
+        groups: groupsPayload,
         groupStatuts: factureGroupStatuts[selectedFactureId] || {},
         groupComments: factureGroupComments[selectedFactureId] || {},
         lineStatuts: factureLineStatuts[selectedFactureId] || {},

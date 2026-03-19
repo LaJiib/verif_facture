@@ -352,6 +352,14 @@ class LineStatutItem(BaseModel):
     comment: Optional[str] = None
 
 
+class AutoVerifGroupItem(BaseModel):
+    groupKey: str
+    ligneFactureIds: List[int] = []
+    statut: AutoVerifGroupStatut
+    comments: Dict[str, Optional[str]] = {}
+    anomalies: List[AutoVerifAnomaly] = []
+
+
 class AutoVerifFullResult(BaseModel):
     metricStatuts: Dict[str, str]
     metricComments: Dict[str, str]
@@ -359,6 +367,7 @@ class AutoVerifFullResult(BaseModel):
     groupStatuts: Dict[str, AutoVerifGroupStatut]
     groupComments: Dict[str, Dict[str, Optional[str]]]
     groupAnomalies: Dict[str, List[AutoVerifAnomaly]]
+    groups: List[AutoVerifGroupItem] = []
     summary: Dict[str, Any]
     previousFactureNum: Optional[str] = None
     lineStatuts: Dict[int, LineStatutItem] = {}  # keyed by ligne_facture_id

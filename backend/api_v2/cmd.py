@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Dict
+from typing import Any, Dict, List
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -513,17 +513,72 @@ def upsert_facture_rapport(facture_id: int, payload: FactureRapportPayload, db: 
     _commit(db)
     db.refresh(report)
 
-    # Applique les statuts de regroupement aux lignes de la facture (sécurité côté backend)
+    # Apply line statuses from report payload.
+    # Priority:
+    # 1) data.groups[].ligneFactureIds (new structure)
+    # 2) data.lineStatuts (per-line structure)
+    # 3) data.groupStatuts (legacy grouped structure)
     try:
-        group_statuts = (payload.data or {}).get("groupStatuts") or {}
-        if group_statuts:
-            # 1) Construire les regroupements (clé -> liste de ligne_facture_id)
-            lignes = (
-                db.query(LigneFacture, Ligne)
-                .join(Ligne, LigneFacture.ligne_id == Ligne.id)
-                .filter(LigneFacture.facture_id == facture_id)
-                .all()
-            )
+        data = payload.data or {}
+        groups = data.get("groups") or []
+        line_statuts = data.get("lineStatuts") or {}
+        group_statuts = data.get("groupStatuts") or {}
+
+        def derive_statut(stat: Dict[str, Any] | None) -> int | None:
+            if not stat:
+                return None
+            abo_net = stat.get("aboNet")
+            achat = stat.get("achat")
+            if abo_net == "conteste" or achat == "conteste":
+                return 2
+            if (abo_net in (None, "valide")) and (achat in (None, "valide")):
+                return 1
+            return 0
+
+        lignes = (
+            db.query(LigneFacture, Ligne)
+            .join(Ligne, LigneFacture.ligne_id == Ligne.id)
+            .filter(LigneFacture.facture_id == facture_id)
+            .all()
+        )
+        allowed_lf_ids = {int(lf.id) for lf, _ in lignes}
+        updates_by_lf: Dict[int, int] = {}
+
+        # 1) New grouped structure (robust against key-format drift).
+        if isinstance(groups, list):
+            for group_item in groups:
+                if not isinstance(group_item, dict):
+                    continue
+                group_stat = group_item.get("statut") or group_item.get("statuts") or group_item.get("status")
+                statut_val = derive_statut(group_stat if isinstance(group_stat, dict) else None)
+                if statut_val is None:
+                    continue
+                lf_ids = group_item.get("ligneFactureIds") or group_item.get("ligne_facture_ids") or []
+                if not isinstance(lf_ids, list):
+                    continue
+                for raw_id in lf_ids:
+                    try:
+                        lf_id = int(raw_id)
+                    except Exception:
+                        continue
+                    if lf_id in allowed_lf_ids:
+                        updates_by_lf[lf_id] = statut_val
+
+        # 2) Per-line payload fallback (keeps compatibility with old save flow).
+        if isinstance(line_statuts, dict):
+            for raw_id, stat in line_statuts.items():
+                try:
+                    lf_id = int(raw_id)
+                except Exception:
+                    continue
+                if lf_id not in allowed_lf_ids or lf_id in updates_by_lf:
+                    continue
+                statut_val = derive_statut(stat if isinstance(stat, dict) else None)
+                if statut_val is not None:
+                    updates_by_lf[lf_id] = statut_val
+
+        # 3) Legacy grouped map fallback.
+        if isinstance(group_statuts, dict) and group_statuts:
             abo_links = (
                 db.query(LigneAbonnement, Abonnement)
                 .join(Abonnement, LigneAbonnement.abonnement_id == Abonnement.id)
@@ -533,7 +588,7 @@ def upsert_facture_rapport(facture_id: int, payload: FactureRapportPayload, db: 
             )
             abo_map = {}
             for la, ab in abo_links:
-                if la.ligne_id not in abo_map:  # conserve le plus récent
+                if la.ligne_id not in abo_map:
                     abo_map[la.ligne_id] = ab
 
             def normalize_key(key: str) -> str:
@@ -549,15 +604,6 @@ def upsert_facture_rapport(facture_id: int, payload: FactureRapportPayload, db: 
                     return f"price|{t}|{netv:.2f}"
                 return key
 
-            def derive_statut(stat: dict | None) -> int | None:
-                if not stat:
-                    return None
-                if stat.get("aboNet") == "conteste" or stat.get("achat") == "conteste":
-                    return 2
-                if (stat.get("aboNet") in (None, "valide")) and (stat.get("achat") in (None, "valide")):
-                    return 1
-                return 0
-
             group_map: Dict[str, List[int]] = {}
             for lf, ligne in lignes:
                 net_unit = round(float(lf.abo + lf.remises), 2)
@@ -566,30 +612,32 @@ def upsert_facture_rapport(facture_id: int, payload: FactureRapportPayload, db: 
                     key = f"abo|{abo_ref.id}|{ligne.type}|{net_unit:.2f}"
                 else:
                     key = f"price|{ligne.type}|{net_unit:.2f}"
-                group_map.setdefault(key, []).append(lf.id)
+                group_map.setdefault(key, []).append(int(lf.id))
 
-            normalized_statuts = {normalize_key(k): v for k, v in group_statuts.items()}
-            updates = []
+            normalized_statuts = {normalize_key(str(k)): v for k, v in group_statuts.items()}
             for key, lf_ids in group_map.items():
                 if key not in normalized_statuts:
                     continue
-                statut_val = derive_statut(normalized_statuts[key])
+                stat = normalized_statuts.get(key)
+                statut_val = derive_statut(stat if isinstance(stat, dict) else None)
                 if statut_val is None:
                     continue
-                updates.extend((lf_id, statut_val) for lf_id in lf_ids)
+                for lf_id in lf_ids:
+                    updates_by_lf.setdefault(lf_id, statut_val)
 
-            if updates:
-                for lf_id, statut_val in updates:
-                    db.query(LigneFacture).filter(LigneFacture.id == lf_id).update({"statut": int(statut_val)})
-                _commit(db)
-                logger.info("Rapport: statuts lignes appliqués facture_id=%s updates=%s", facture_id, len(updates))
-            # Recalcule le statut facture selon statuts lignes + écart validé
-            new_statut = _compute_facture_statut(db, facture_id)
-            if new_statut is not None:
-                db.query(Facture).filter(Facture.id == facture_id).update({"statut": new_statut})
-                db.commit()
+        if updates_by_lf:
+            for lf_id, statut_val in updates_by_lf.items():
+                db.query(LigneFacture).filter(LigneFacture.id == lf_id).update({"statut": int(statut_val)})
+            _commit(db)
+            logger.info("Rapport: statuts lignes appliques facture_id=%s updates=%s", facture_id, len(updates_by_lf))
+
+        # Always recompute facture status after report save.
+        new_statut = _compute_facture_statut(db, facture_id)
+        if new_statut is not None:
+            db.query(Facture).filter(Facture.id == facture_id).update({"statut": new_statut})
+            db.commit()
     except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("Impossible d'appliquer les statuts groupes sur les lignes facture_id=%s: %s", facture_id, exc)
+        logger.warning("Impossible d'appliquer les statuts du rapport facture_id=%s: %s", facture_id, exc)
         db.rollback()
 
     return FactureRapportOut(

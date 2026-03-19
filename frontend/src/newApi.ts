@@ -210,6 +210,13 @@ export interface AutoVerifFullResult {
   groupStatuts: Record<string, { aboNet: string; achat: string }>;
   groupComments: Record<string, { aboNet?: string; achat?: string }>;
   groupAnomalies: Record<string, { kind: string; line?: string; detail: string; prev_net?: number; curr_net?: number; prev_achat?: number; curr_achat?: number }[]>;
+  groups?: {
+    groupKey: string;
+    ligneFactureIds: number[];
+    statut: { aboNet: string; achat: string };
+    comments?: { aboNet?: string; achat?: string };
+    anomalies?: { kind: string; line?: string; detail: string; prev_net?: number; curr_net?: number; prev_achat?: number; curr_achat?: number }[];
+  }[];
   summary: { added: number; removed: number; modified: number; previousFactureId: number | null; previousFactureNum?: string | null };
   previousFactureNum?: string | null;
   lineStatuts?: Record<number, { aboNet: string; achat: string; comment?: string }>;
