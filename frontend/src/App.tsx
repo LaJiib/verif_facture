@@ -22,9 +22,13 @@ export default function App() {
   const [currentEntrepriseId, setCurrentEntrepriseId] = useState<number | null>(null);
   const [entreprises, setEntreprises] = useState<Array<{ id: number; nom: string }>>([]);
   const [csvFormats, setCsvFormats] = useState<CsvFormatConfig[]>([]);
+  const [fallbackWarning, setFallbackWarning] = useState<string | null>(null);
 
-  // Charger les entreprises au démarrage
   useEffect(() => {
+    fetch("/health")
+      .then(r => r.json())
+      .then(data => { if (data.fallback_warning) setFallbackWarning(data.fallback_warning); })
+      .catch(() => {});
     loadEntreprises();
     loadFormats();
   }, []);
@@ -105,31 +109,24 @@ export default function App() {
 
   // Si aucune entreprise n'est sélectionnée
   if (currentEntrepriseId === null && entreprises.length === 0 &&
-    route.page !== "create-entreprise") {
+    route.page !== "create-entreprise" && route.page !== "settings") {
     return (
-      <div style={{
-        display: "flex",
-        justifyContent: "center",
-        alignItems: "center",
-        height: "100vh",
-        flexDirection: "column",
-        gap: "1rem"
-      }}>
-        <p>Aucune entreprise disponible</p>
-        <button
-          onClick={navigateToCreateEntreprise}
-          style={{
-            background: "#3b82f6",
-            color: "white",
-            border: "none",
-            borderRadius: "0.5rem",
-            padding: "0.75rem 1.5rem",
-            cursor: "pointer",
-          }}
-        >
-          Créer une entreprise
-        </button>
-      </div>
+      <>
+        <Sidebar
+          currentEntrepriseId={null}
+          entreprises={[]}
+          onSelectEntreprise={() => {}}
+          onCreateEntreprise={navigateToCreateEntreprise}
+          onNavigateToSettings={navigateToSettings}
+          onNavigateToImport={() => {}}
+        />
+        <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: "100vh", flexDirection: "column", gap: "1rem" }}>
+          <p>Aucune entreprise disponible</p>
+          <button onClick={navigateToCreateEntreprise} style={{ background: "#3b82f6", color: "white", border: "none", borderRadius: "0.5rem", padding: "0.75rem 1.5rem", cursor: "pointer" }}>
+            Créer une entreprise
+          </button>
+        </div>
+      </>
     );
   }
 
@@ -137,6 +134,17 @@ export default function App() {
 
   return (
     <>
+      {fallbackWarning && (
+        <div style={{
+          position: "fixed", top: 0, left: 0, right: 0, zIndex: 9999,
+          background: "#854d0e", color: "#fef9c3",
+          padding: "0.5rem 1rem", fontSize: "0.85rem",
+          display: "flex", justifyContent: "space-between", alignItems: "center"
+        }}>
+          <span>⚠️ {fallbackWarning}</span>
+          <button onClick={() => setFallbackWarning(null)} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer" }}>✕</button>
+        </div>
+      )}
       <Sidebar
         currentEntrepriseId={currentEntrepriseId}
         entreprises={entreprises}

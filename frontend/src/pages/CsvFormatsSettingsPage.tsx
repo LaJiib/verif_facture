@@ -9,7 +9,7 @@ interface CsvFormatsSettingsPageProps {
 }
 
 const REQUIRED_COLUMN_SET = new Set<string>(REQUIRED_CSV_COLUMNS);
-const columnFields: Array<{ key: keyof CsvFormatConfig["columns"]; label: string; required?: boolean }> = [
+const columnFields: Array<{ key: string; label: string; required?: boolean }> = [
   { key: "numeroCompte", label: "Numéro compte" },
   { key: "numeroAcces", label: "Numéro accès" },
   { key: "numeroFacture", label: "Numéro facture" },
@@ -104,7 +104,7 @@ export default function CsvFormatsSettingsPage({ formats, onSaveFormat, onBack }
     }
 
     for (const field of columnFields.filter((field) => field.required)) {
-      if (!columns[field.key]?.trim()) {
+      if (!columns[field.key as keyof typeof columns]?.trim()) {
         setError("Merci de renseigner tous les champs obligatoires.");
         return;
       }
@@ -313,8 +313,8 @@ export default function CsvFormatsSettingsPage({ formats, onSaveFormat, onBack }
                       {field.label} {field.required ? "*" : ""}
                     </label>
                     <input
-                      value={columns[field.key]}
-                      onChange={(e) => handleChange(field.key, e.target.value)}
+                      value={columns[field.key as keyof typeof columns]}
+                      onChange={(e) => handleChange(field.key as keyof typeof columns, e.target.value)}
                       placeholder="Titre exact de la colonne dans le CSV"
                       style={{ width: "100%", padding: "0.5rem" }}
                       required={field.required}

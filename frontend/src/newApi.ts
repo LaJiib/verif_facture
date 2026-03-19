@@ -7,7 +7,7 @@
  * - Facture: Facture mensuelle (abo, conso, remise, statut)
  */
 
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
 const V2_READ = `${API_BASE_URL}/v2/read`;
 const V2_CMD = `${API_BASE_URL}/v2/cmd`;
 const V2_VIEW = `${API_BASE_URL}/v2/view`;

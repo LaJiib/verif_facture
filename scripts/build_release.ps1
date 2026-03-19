@@ -104,7 +104,7 @@ python -m PyInstaller migrate_add_ligne_statut.spec
 Pop-Location
 
 # Optionnel: build installeur Inno Setup si iscc est disponible
-$iss = Join-Path $repoRoot "installer" "VerifFacture.iss"
+$iss = Join-Path (Join-Path $repoRoot "installer") "VerifFacture.iss"
 if (Get-Command iscc.exe -ErrorAction SilentlyContinue) {
     Write-Host "==> Inno Setup (version $appVersion)" -ForegroundColor Cyan
     iscc.exe "/DMyAppVersion=$appVersion" $iss
