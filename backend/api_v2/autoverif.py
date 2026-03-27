@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import datetime
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from ..models import Facture, LigneFacture, Ligne, LigneAbonnement, Abonnement
+from ..models import Facture, LigneFacture, Ligne, LigneAbonnement, Abonnement, FactureReport
 from .schemas import AutoVerifFullResult, AutoVerifAnomaly
 
 logger = logging.getLogger("api_v2.autoverif")
@@ -63,53 +63,97 @@ def _build_group_key(ligne_type: int, net_abo: float, abo_id_ref: Optional[int] 
     return f"price|{int(ligne_type)}|{float(net_abo):.2f}"
 
 
-def _get_nearest_validated_facture(
-    compte_id: int,
-    target_date: datetime.date,
+def _is_non_empty_report(report: Optional[FactureReport]) -> bool:
+    if report is None:
+        return False
+
+    commentaire = str(report.commentaire or "").strip()
+    if commentaire:
+        return True
+
+    data: Any = report.data
+    if data is None:
+        return False
+    if isinstance(data, (dict, list, tuple, set)):
+        return len(data) > 0
+    if isinstance(data, str):
+        return bool(data.strip())
+    return True
+
+
+def _select_reference_facture_by_shared_lines(
+    facture: Facture,
+    current_line_ids: set[int],
     db: Session,
-    exclude_id: Optional[int] = None,
-) -> Optional[Facture]:
-    rows = (
-        db.query(Facture)
+) -> Tuple[Optional[Facture], int, int, int]:
+    """
+    Select a previous validated invoice by maximizing shared ligne_id overlap.
+    Returns:
+      (reference_facture, shared_count, current_count, reference_count)
+    """
+    current_count = len(current_line_ids)
+    if current_count == 0:
+        return None, 0, 0, 0
+
+    candidate_rows = (
+        db.query(Facture, FactureReport)
+        .outerjoin(FactureReport, FactureReport.facture_id == Facture.id)
         .filter(
-            Facture.compte_id == compte_id,
-            Facture.statut == 1,
-            Facture.id != None,  # noqa: E711
-            Facture.id != exclude_id if exclude_id is not None else True,
+            Facture.compte_id == facture.compte_id,
+            Facture.id != facture.id,
+            Facture.date < facture.date,
         )
+        .order_by(Facture.date.desc(), Facture.id.desc())
         .all()
     )
-    if not rows:
-        return None
-    best = None
-    best_delta = None
-    for f in rows:
-        delta = abs((target_date - f.date).days)
-        if best_delta is None or delta < best_delta:
-            best_delta = delta
-            best = f
-    return best
+    candidates = [cand for cand, report in candidate_rows if _is_non_empty_report(report)]
+    if not candidates:
+        return None, 0, current_count, 0
 
-
-def _get_nearest_validated_facture_ref(
-    ligne_id: int,
-    compte_id: int,
-    facture_date: datetime.date,
-    db: Session,
-    exclude_id: Optional[int] = None,
-) -> Optional[float]:
-    """Find nearest validated invoice (before/after) and return net_abo for this line."""
-    nearest = _get_nearest_validated_facture(compte_id, facture_date, db, exclude_id=exclude_id)
-    if not nearest:
-        return None
-    row = (
-        db.query((LigneFacture.abo + LigneFacture.remises).label("net_abo"))
-        .filter(LigneFacture.facture_id == nearest.id, LigneFacture.ligne_id == ligne_id)
-        .first()
+    candidate_ids = [int(f.id) for f in candidates]
+    rows = (
+        db.query(
+            LigneFacture.facture_id.label("facture_id"),
+            LigneFacture.ligne_id.label("ligne_id"),
+        )
+        .filter(LigneFacture.facture_id.in_(candidate_ids))
+        .all()
     )
-    if row:
-        return float(row.net_abo or 0)
-    return None
+
+    lines_by_facture: Dict[int, set[int]] = {}
+    for row in rows:
+        fid = int(row.facture_id)
+        lid = int(row.ligne_id)
+        lines_by_facture.setdefault(fid, set()).add(lid)
+
+    best: Optional[Facture] = None
+    best_shared = -1
+    best_ref_count = 0
+    for cand in candidates:
+        cand_line_ids = lines_by_facture.get(int(cand.id), set())
+        shared = len(current_line_ids.intersection(cand_line_ids))
+        if shared > best_shared:
+            best = cand
+            best_shared = shared
+            best_ref_count = len(cand_line_ids)
+
+    # No relevant overlap: treat as no reference to avoid arbitrary comparisons.
+    if best is None or best_shared <= 0:
+        return None, 0, current_count, 0
+
+    return best, best_shared, current_count, best_ref_count
+
+
+def _load_net_abo_by_ligne_for_facture(facture_id: int, db: Session) -> Dict[int, float]:
+    rows = (
+        db.query(
+            LigneFacture.ligne_id.label("ligne_id"),
+            (LigneFacture.abo + LigneFacture.remises).label("net_abo"),
+        )
+        .filter(LigneFacture.facture_id == facture_id)
+        .all()
+    )
+    return {int(r.ligne_id): float(r.net_abo or 0) for r in rows}
 
 
 def _status_priority(val: str) -> int:
@@ -181,6 +225,16 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
         if abo_ref:
             line["abo_id_ref"] = int(abo_ref["id"])
 
+    current_line_ids = {int(l["ligne_id"]) for l in lignes}
+    reference_facture, shared_lines_count, selected_lines_count, reference_lines_count = (
+        _select_reference_facture_by_shared_lines(
+            facture=facture,
+            current_line_ids=current_line_ids,
+            db=db,
+        )
+    )
+    reference_net_map = _load_net_abo_by_ligne_for_facture(reference_facture.id, db) if reference_facture else {}
+
     total_lignes = sum(l["net_abo"] + l["conso"] + l["achat"] for l in lignes)
     total_facture = float(facture.total_ht or 0)
     ecart_val = round(total_facture - total_lignes, 2)
@@ -209,14 +263,8 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
             ref_nom = str(abo_ref["nom"] or "")
             ref_origin = "abonnement_contractuel"
         else:
-            ref_price = _get_nearest_validated_facture_ref(
-                line["ligne_id"],
-                facture.compte_id,
-                facture.date,
-                db,
-                exclude_id=facture.id,
-            )
-            ref_origin = "facture_validee"
+            ref_price = reference_net_map.get(int(line["ligne_id"]))
+            ref_origin = "facture_reference_overlap"
 
         if ref_price is not None:
             if abs(float(line["net_abo"]) - ref_price) < 0.01:
@@ -236,10 +284,19 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
                 )
         else:
             status = "a_verifier"
-            detail = "Aucune reference disponible (abonnement ou facture validee)"
+            if reference_facture:
+                detail = f"Ligne absente de la facture de reference {reference_facture.num}"
+            else:
+                detail = "Aucune reference disponible (abonnement ou facture de reference pertinente)"
 
-        prefix = f"[Abo: {ref_nom}]" if ref_origin == "abonnement_contractuel" and ref_nom else (
-            "[Abo contractuel]" if ref_origin == "abonnement_contractuel" else "[Mois precedents]"
+        prefix = (
+            f"[Abo: {ref_nom}]"
+            if ref_origin == "abonnement_contractuel" and ref_nom
+            else "[Abo contractuel]"
+            if ref_origin == "abonnement_contractuel"
+            else f"[Facture ref: {reference_facture.num}]"
+            if reference_facture
+            else "[Pas de facture de reference]"
         )
 
         line_statuts[int(line["ligne_facture_id"])] = {
@@ -301,11 +358,29 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
     }
     metric_reals = {"ecart": f"{ecart_val:.2f}"}
 
-    previous_facture = _get_nearest_validated_facture(facture.compte_id, facture.date, db, exclude_id=facture.id)
-    summary = {"added": 0, "removed": 0, "modified": 0, "previousFactureId": None, "previousFactureNum": None}
+    previous_facture = reference_facture
+    summary = {
+        "added": 0,
+        "removed": 0,
+        "modified": 0,
+        "previousFactureId": None,
+        "previousFactureNum": None,
+        "previousFactureDate": None,
+        "referenceFactureId": None,
+        "referenceFactureNum": None,
+        "referenceFactureDate": None,
+        "sharedLinesCount": int(shared_lines_count),
+        "selectedLinesCount": int(selected_lines_count),
+        "referenceLinesCount": int(reference_lines_count),
+        "selectionRule": "max_shared_lines",
+    }
     if previous_facture:
         summary["previousFactureId"] = previous_facture.id
         summary["previousFactureNum"] = previous_facture.num
+        summary["previousFactureDate"] = previous_facture.date.isoformat() if previous_facture.date else None
+        summary["referenceFactureId"] = previous_facture.id
+        summary["referenceFactureNum"] = previous_facture.num
+        summary["referenceFactureDate"] = previous_facture.date.isoformat() if previous_facture.date else None
         prev_lines_rows = (
             db.query(
                 LigneFacture.ligne_id.label("ligne_id"),

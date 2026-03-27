@@ -4,7 +4,7 @@ import React from "react";
 // stats: Record<number, number> où 0=importé, 1=validé, 2=contesté.
 
 // Couleurs dans l'ordre demandé : vert (validé) -> orange (contesté) -> gris (importé)
-const COLORS: Record<number, string> = {
+export const STATUS_COLORS: Record<number, string> = {
   1: "#10b981", // vert
   2: "#f59e0b", // orange
   0: "#9ca3af", // gris
@@ -67,7 +67,7 @@ export function StatusBar({
           key={seg.code}
           style={{
             width: `${seg.pct}%`,
-            background: COLORS[seg.code],
+            background: STATUS_COLORS[seg.code],
           }}
         />
       ))}

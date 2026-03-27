@@ -55,16 +55,21 @@ def _commit(db: Session):
 
 
 def _compute_facture_statut(db: Session, facture_id: int) -> int | None:
-    """Calcule le statut cible d'une facture selon statuts lignes et métrique écart."""
+    """
+    Calcule le statut cible d'une facture selon:
+    - statuts des lignes (si présentes)
+    - statut global d'écart (report.data.metricStatuts.ecart)
+
+    Règle métier:
+    - conteste si un élément est contesté (écart ou ligne)
+    - valide si tout est validé
+    - sinon à vérifier (code 0)
+    """
     facture = db.query(Facture).filter(Facture.id == facture_id).first()
     if not facture:
         return None
+
     ligne_statuts = [s for (s,) in db.query(LigneFacture.statut).filter(LigneFacture.facture_id == facture_id).all()]
-    if not ligne_statuts:
-        return facture.statut
-    any_conteste = any(s == 2 for s in ligne_statuts)
-    any_import = any(s in (0, None) for s in ligne_statuts)
-    all_valid = not any_conteste and not any_import
 
     ecart_statut = None
     report = db.query(FactureReport).filter(FactureReport.facture_id == facture_id).first()
@@ -74,9 +79,24 @@ def _compute_facture_statut(db: Session, facture_id: int) -> int | None:
     except Exception:
         ecart_statut = None
 
-    if any_conteste or ecart_statut == "conteste":
+    # Priorité absolue: un conteste global ou ligne => facture contestée.
+    if ecart_statut == "conteste":
         return 2
-    if all_valid and ecart_statut == "valide":
+
+    # Cas avec lignes: toutes valides + écart valide => facture validée.
+    if ligne_statuts:
+        any_conteste = any(s == 2 for s in ligne_statuts)
+        any_import = any(s in (0, None) for s in ligne_statuts)
+        all_valid = not any_conteste and not any_import
+
+        if any_conteste:
+            return 2
+        if all_valid and ecart_statut == "valide":
+            return 1
+        return 0
+
+    # Cas sans lignes: on se base uniquement sur l'écart.
+    if ecart_statut == "valide":
         return 1
     return 0
 

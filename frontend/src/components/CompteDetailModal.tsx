@@ -16,6 +16,7 @@ import {
   type Facture,
 } from "../newApi";
 import { decodeLineType, decodeFactureStatus, decodeLigneFactureStatus } from "../utils/codecs";
+import { STATUS_COLORS } from "../utils/statusBar";
 import { exportFactureReportPdf } from "../utils/pdfReport";
 import { exportFactureReportDocx } from "../utils/docxReport";
 import { runAutoVerification, StatutValeur, LigneAnomalie } from "../utils/autoVerification";
@@ -176,6 +177,16 @@ interface AbonnementSelection {
   commentaire?: string | null;
 }
 
+interface FactureReferenceInfo {
+  factureId?: number | null;
+  factureNum?: string | null;
+  factureDate?: string | null;
+  sharedLinesCount?: number;
+  selectedLinesCount?: number;
+  referenceLinesCount?: number;
+  selectionRule?: string;
+}
+
 const statutTokens: Record<StatutValeur, { bg: string; color: string; label: string }> = {
   valide: { bg: "#ecfdf3", color: "#15803d", label: "Valide" },
   conteste: { bg: "#fef2f2", color: "#b91c1c", label: "Conteste" },
@@ -270,6 +281,7 @@ export default function CompteDetailModal({
   const [factureMetricReals, setFactureMetricReals] = useState<Record<number, { ecart?: string }>>({});
   const [factureGroupReals, setFactureGroupReals] = useState<Record<number, Record<string, { aboNet?: string; achat?: string }>>>({});
   const [factureGroupAbonnements, setFactureGroupAbonnements] = useState<Record<number, Record<string, AbonnementSelection>>>({});
+  const [factureReferenceInfos, setFactureReferenceInfos] = useState<Record<number, FactureReferenceInfo>>({});
   const [abonnements, setAbonnements] = useState<Abonnement[]>([]);
   const [abonnementsLoading, setAbonnementsLoading] = useState(false);
   const [ligneModalId, setLigneModalId] = useState<number | null>(null);
@@ -305,6 +317,11 @@ export default function CompteDetailModal({
   useEffect(() => {
     loadData();
   }, [compteId, mois]);
+
+  useEffect(() => {
+    if (!selectedFactureId) return;
+    loadData();
+  }, [selectedFactureId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -478,18 +495,45 @@ export default function CompteDetailModal({
       }));
 
       console.log("[Auto] Resume calcule", autoResult);
-      const { added, removed, modified, previousFactureId, previousFactureNum } = autoResult.summary;
+      const {
+        added,
+        removed,
+        modified,
+        previousFactureId,
+        previousFactureNum,
+        previousFactureDate,
+        sharedLinesCount,
+        selectedLinesCount,
+        referenceLinesCount,
+        selectionRule,
+      } = autoResult.summary;
       const prevNumFromList =
         previousFactureId !== null
           ? detailFactures.find((f) => f.facture_id === previousFactureId)?.facture_num ||
             prevFactures.find((f) => f.facture_id === previousFactureId)?.facture_num
           : null;
       const prevDisplay = previousFactureNum || prevNumFromList || previousFactureId;
+      const overlapInfo =
+        typeof sharedLinesCount === "number" && typeof selectedLinesCount === "number"
+          ? ` (${sharedLinesCount}/${selectedLinesCount} lignes communes)`
+          : "";
+      setFactureReferenceInfos((prev) => ({
+        ...prev,
+        [factureCourante.facture_id]: {
+          factureId: previousFactureId,
+          factureNum: previousFactureNum ?? (typeof prevDisplay === "string" ? prevDisplay : prevDisplay ? String(prevDisplay) : null),
+          factureDate: previousFactureDate || null,
+          sharedLinesCount,
+          selectedLinesCount,
+          referenceLinesCount,
+          selectionRule,
+        },
+      }));
       alert(
         `Auto (CSV+lignes) terminee : ${modified} ligne(s) modifiee(s), ${added} ajoutee(s), ${removed} supprimee(s)` +
           (previousFactureId
-            ? ` (comparatif avec facture validee ${prevDisplay}).`
-            : " (pas de facture validee precedente).")
+            ? ` (comparatif avec facture de reference ${prevDisplay}${overlapInfo}).`
+            : " (pas de facture de reference pertinente).")
       );
 
     } catch (err) {
@@ -627,7 +671,11 @@ export default function CompteDetailModal({
       } catch (inner) {
         console.warn("Impossible de recuperer la liste des factures", inner);
       }
-      facturesListe.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+      facturesListe.sort((a, b) => {
+        const dateOrder = String(b.date).localeCompare(String(a.date));
+        if (dateOrder !== 0) return dateOrder;
+        return Number(b.id) - Number(a.id);
+      });
 
       let targetFactureId = selectedFactureId;
       if (!targetFactureId || !facturesListe.some((f) => f.id === targetFactureId)) {
@@ -733,7 +781,9 @@ export default function CompteDetailModal({
               },
             ];
       setDetailFactures(facturesDetail);
-      setSelectedFactureId(f.id);
+      if (!selectedFactureId || !facturesListe.some((fa) => fa.id === selectedFactureId)) {
+        setSelectedFactureId(f.id);
+      }
 
       // 5) Résumé lignes (écarts)
       const lignesAbo = lignes.reduce((acc, l) => acc + (l.abo || 0), 0);
@@ -1022,6 +1072,7 @@ export default function CompteDetailModal({
       facture_id: facture.facture_id,
       facture_num: facture.facture_num,
       facture_date: facture.facture_date,
+      facture_statut: facture.facture_statut,
         csv_id: (facture as any).csv_id,
         facture_total: facture.total_ht,
         lignes_total: lignesTotal,
@@ -1034,6 +1085,7 @@ export default function CompteDetailModal({
   const facturesEnAlerte = facturesAvecEcart.filter((f) => Math.abs(f.ecart) > 0.05);
 
   const factureCourante = facturesAvecEcart.find((f) => f.facture_id === selectedFactureId) || null;
+  const referenceInfoCourante = factureCourante ? factureReferenceInfos[factureCourante.facture_id] : undefined;
   const ligneGroupesFacture = factureLigneGroupes.filter((g) => g.facture_id === selectedFactureId);
   const resumeFacture = factureLignesResume.find((r) => r.facture_id === selectedFactureId) || null;
   const totalLignesFactureHt = resumeFacture?.lignes_total_ht || 0;
@@ -1351,6 +1403,12 @@ export default function CompteDetailModal({
           }
           if (data.groupAbonnements) {
             setFactureGroupAbonnements((prev) => ({ ...prev, [selectedFactureId]: data.groupAbonnements }));
+          }
+          if (data.referenceInfo) {
+            setFactureReferenceInfos((prev) => ({
+              ...prev,
+              [selectedFactureId]: data.referenceInfo,
+            }));
           }
         }
       } catch (err) {
@@ -1755,6 +1813,7 @@ export default function CompteDetailModal({
         groupReals: factureGroupReals[selectedFactureId] || {},
         groupAnomalies: factureGroupAnomalies[selectedFactureId] || {},
         groupAbonnements: finalGroupAbonnements,
+        referenceInfo: factureReferenceInfos[selectedFactureId] || null,
       },
     };
     try {
@@ -2771,6 +2830,7 @@ export default function CompteDetailModal({
                       <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem" }}>
                         {facturesAvecEcart.map((f) => {
                           const isActive = f.facture_id === selectedFactureId;
+                          const statusColor = STATUS_COLORS[f.facture_statut as 0 | 1 | 2] || STATUS_COLORS[0];
                           return (
                             <button
                               key={f.facture_id}
@@ -2779,27 +2839,24 @@ export default function CompteDetailModal({
                                 textAlign: "left",
                                 padding: "0.55rem 0.7rem",
                                 borderRadius: "0.55rem",
-                                border: isActive ? "1px solid #2563eb" : "1px solid #e5e7eb",
-                                background: isActive ? "#eff6ff" : "#f9fafb",
+                                border: isActive ? `1px solid ${statusColor}` : `1px solid ${statusColor}66`,
+                                background: isActive ? `${statusColor}2A` : `${statusColor}14`,
                                 cursor: "pointer",
                                 color: "#0f172a",
                                 display: "flex",
                                 justifyContent: "space-between",
                                 alignItems: "center",
                                 gap: "0.5rem",
-                                boxShadow: isActive ? "0 10px 25px rgba(37,99,235,0.12)" : "none",
+                                boxShadow: "none",
                               }}
                             >
                               <div>
                                 <div style={{ fontWeight: 700 }}>{f.facture_num}</div>
                                 <div style={{ fontSize: "0.85rem", color: "#6b7280" }}>{f.facture_date}</div>
+                                <div style={{ fontSize: "0.78rem", color: statusColor, fontWeight: 700 }}>{decodeFactureStatus(f.facture_statut)}</div>
                               </div>
                               <div style={{ textAlign: "right" }}>
                                  <div style={{ fontWeight: 700 }}>{Number(f.facture_total || 0).toFixed(2)} €</div>
-                                <div style={{ color: Math.abs(f.ecart) > 0.05 ? "#dc2626" : "#16a34a", fontSize: "0.85rem" }}>
-                                  {f.ecart >= 0 ? "+" : ""}
-                                   {Number(f.ecart || 0).toFixed(2)} € 
-                                </div>
                               </div>
                             </button>
                           );
@@ -3079,7 +3136,22 @@ export default function CompteDetailModal({
                           <div style={{ ...rapportCardStyle, padding: "1rem" }}>
                             <div style={{ marginBottom: "0.6rem", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
                               <h4 style={{ margin: 0 }}>Comparatif avant / apres (lignes modifiees)</h4>
-                              <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Vu côte ligne (prix/groupe avant → apres)</span>
+                              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "0.2rem" }}>
+                                <span style={{ color: "#6b7280", fontSize: "0.9rem" }}>Vu côte ligne (prix/groupe avant → apres)</span>
+                                <span style={{ color: "#334155", fontSize: "0.85rem", fontWeight: 600 }}>
+                                  {referenceInfoCourante?.factureNum
+                                    ? `Facture de reference: ${referenceInfoCourante.factureNum}${
+                                        referenceInfoCourante.factureDate ? ` (${String(referenceInfoCourante.factureDate).slice(0, 10)})` : ""
+                                      }`
+                                    : "Facture de reference: non disponible"}
+                                </span>
+                                <span style={{ color: "#64748b", fontSize: "0.82rem" }}>
+                                  {typeof referenceInfoCourante?.sharedLinesCount === "number" &&
+                                  typeof referenceInfoCourante?.selectedLinesCount === "number"
+                                    ? `Lignes communes / lignes selectionnees: ${referenceInfoCourante.sharedLinesCount}/${referenceInfoCourante.selectedLinesCount}`
+                                    : "Lignes communes / lignes selectionnees: n/a"}
+                                </span>
+                              </div>
                             </div>
                             <div style={{ overflowX: "auto" }}>
                               <table style={{ width: "100%", minWidth: "900px", borderCollapse: "separate", borderSpacing: 0, fontSize: "0.86rem" }}>

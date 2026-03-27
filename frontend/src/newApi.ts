@@ -217,7 +217,21 @@ export interface AutoVerifFullResult {
     comments?: { aboNet?: string; achat?: string };
     anomalies?: { kind: string; line?: string; detail: string; prev_net?: number; curr_net?: number; prev_achat?: number; curr_achat?: number }[];
   }[];
-  summary: { added: number; removed: number; modified: number; previousFactureId: number | null; previousFactureNum?: string | null };
+  summary: {
+    added: number;
+    removed: number;
+    modified: number;
+    previousFactureId: number | null;
+    previousFactureNum?: string | null;
+    previousFactureDate?: string | null;
+    referenceFactureId?: number | null;
+    referenceFactureNum?: string | null;
+    referenceFactureDate?: string | null;
+    sharedLinesCount?: number;
+    selectedLinesCount?: number;
+    referenceLinesCount?: number;
+    selectionRule?: string;
+  };
   previousFactureNum?: string | null;
   lineStatuts?: Record<number, { aboNet: string; achat: string; comment?: string }>;
 }

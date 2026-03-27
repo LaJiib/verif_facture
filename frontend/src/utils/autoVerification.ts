@@ -36,7 +36,21 @@ export interface AutoVerificationResult {
     anomalies: LigneAnomalie[];
   }>;
   lineStatuts: Record<number, { aboNet: StatutValeur; achat: StatutValeur; comment?: string }>;
-  summary: { added: number; removed: number; modified: number; previousFactureId: number | null; previousFactureNum?: string | null };
+  summary: {
+    added: number;
+    removed: number;
+    modified: number;
+    previousFactureId: number | null;
+    previousFactureNum?: string | null;
+    previousFactureDate?: string | null;
+    referenceFactureId?: number | null;
+    referenceFactureNum?: string | null;
+    referenceFactureDate?: string | null;
+    sharedLinesCount?: number;
+    selectedLinesCount?: number;
+    referenceLinesCount?: number;
+    selectionRule?: string;
+  };
 }
 
 function coerceStatut(value: string | undefined): StatutValeur {

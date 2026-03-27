@@ -98,7 +98,7 @@ def list_factures(
         q = q.filter(Facture.date >= date_debut)
     if date_fin:
         q = q.filter(Facture.date <= date_fin)
-    factures = q.order_by(Facture.date.desc()).all()
+    factures = q.order_by(Facture.date.desc(), Facture.id.desc()).all()
     logger.info("List factures count=%s entreprise_id=%s compte_id=%s", len(factures), entreprise_id, compte_id)
     return [
         FactureOut(
