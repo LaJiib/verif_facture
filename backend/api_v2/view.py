@@ -480,12 +480,15 @@ def facture_detail(facture_id: int, db: Session = Depends(get_db)):
         .filter(LigneFacture.facture_id == facture_id)
         .all()
     )
-    # Abonnements principaux par ligne (si existants)
+    # Abonnements principaux par ligne (si existants) — limité à ceux antérieurs ou égaux à la date de facture
     abo_links = (
         db.query(LigneAbonnement, Abonnement)
         .join(Abonnement, LigneAbonnement.abonnement_id == Abonnement.id)
         .filter(LigneAbonnement.ligne_id.in_([lf.ligne_id for lf, _ in lignes]))
-        .order_by(LigneAbonnement.date.desc())
+        .filter(
+            (LigneAbonnement.date <= facture.date) | LigneAbonnement.date.is_(None)
+        )
+        .order_by(LigneAbonnement.date.desc(), LigneAbonnement.id.desc())
         .all()
     )
     abo_map = {}

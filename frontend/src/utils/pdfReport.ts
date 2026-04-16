@@ -37,7 +37,7 @@ export interface FactureReportData {
   logoHeightMm?: number; // hauteur souhaitée en mm (optionnel)
 }
 
-export function exportFactureReportPdf(data: FactureReportData) {
+function _buildPdfDoc(data: FactureReportData): InstanceType<typeof jsPDF> {
   const doc = new jsPDF("p", "mm", "a4");
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -314,7 +314,17 @@ export function exportFactureReportPdf(data: FactureReportData) {
     });
   }
 
-doc.save(`rapport_facture_${data.factureNum || data.factureId}.pdf`);
+  return doc;
+}
+
+export function exportFactureReportPdf(data: FactureReportData) {
+  _buildPdfDoc(data).save(`rapport_facture_${data.factureNum || data.factureId}.pdf`);
+}
+
+export function buildFactureReportPdfBase64(data: FactureReportData): string {
+  const doc = _buildPdfDoc(data);
+  const dataUri = doc.output("datauristring") as string;
+  return dataUri.split(",")[1];
 }
 
 export interface LotRecapCompte {

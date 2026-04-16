@@ -27,7 +27,7 @@ def _get_active_subscription_price(ligne_id: int, db: Session) -> Optional[Tuple
         db.query(Abonnement.prix, Abonnement.nom)
         .join(LigneAbonnement, LigneAbonnement.abonnement_id == Abonnement.id)
         .filter(LigneAbonnement.ligne_id == ligne_id)
-        .order_by(LigneAbonnement.date.desc().nullslast())
+        .order_by(LigneAbonnement.date.desc().nullslast(), LigneAbonnement.id.desc())
         .first()
     )
     if row:
@@ -35,16 +35,23 @@ def _get_active_subscription_price(ligne_id: int, db: Session) -> Optional[Tuple
     return None
 
 
-def _get_latest_abonnement_by_ligne(ligne_ids: List[int], db: Session) -> Dict[int, dict]:
+def _get_latest_abonnement_by_ligne(
+    ligne_ids: List[int],
+    db: Session,
+    facture_date: Optional[datetime.date] = None,
+) -> Dict[int, dict]:
     if not ligne_ids:
         return {}
-    rows = (
+    q = (
         db.query(LigneAbonnement, Abonnement)
         .join(Abonnement, LigneAbonnement.abonnement_id == Abonnement.id)
         .filter(LigneAbonnement.ligne_id.in_(ligne_ids))
-        .order_by(LigneAbonnement.date.desc().nullslast())
-        .all()
     )
+    if facture_date is not None:
+        q = q.filter(
+            (LigneAbonnement.date <= facture_date) | LigneAbonnement.date.is_(None)
+        )
+    rows = q.order_by(LigneAbonnement.date.desc().nullslast(), LigneAbonnement.id.desc()).all()
     out: Dict[int, dict] = {}
     for la, ab in rows:
         if la.ligne_id in out:
@@ -219,7 +226,9 @@ def compute_auto_verif_full(facture_id: int, db: Session) -> AutoVerifFullResult
         for row in lignes_rows
     ]
 
-    abo_ref_map = _get_latest_abonnement_by_ligne([int(l["ligne_id"]) for l in lignes], db)
+    abo_ref_map = _get_latest_abonnement_by_ligne(
+        [int(l["ligne_id"]) for l in lignes], db, facture_date=facture.date
+    )
     for line in lignes:
         abo_ref = abo_ref_map.get(int(line["ligne_id"]))
         if abo_ref:

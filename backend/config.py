@@ -104,3 +104,7 @@ DATABASE_URL = f"sqlite:///{DB_PATH}"
 # Dossier uploads CSV
 UPLOAD_DIR = (DATA_DIR / "uploads").resolve()
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# Dossier rapports PDF générés automatiquement
+RAPPORTS_DIR = (DATA_DIR / "rapports").resolve()
+RAPPORTS_DIR.mkdir(parents=True, exist_ok=True)

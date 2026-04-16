@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date as _Date, datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -56,7 +56,7 @@ class LigneOut(LigneBase):
 class FactureBase(BaseModel):
     numero_facture: str
     compte_id: int
-    date: date
+    date: _Date
     abo: float = 0
     conso: float = 0
     remises: float = 0
@@ -112,7 +112,7 @@ class AbonnementAttachPayload(BaseModel):
     prix: Optional[float] = None
     commentaire: Optional[str] = None
     entreprise_id: Optional[int] = None
-    date: Optional[date] = None
+    date: Optional[_Date] = None
 
 
 class FactureRapportPayload(BaseModel):
@@ -371,3 +371,12 @@ class AutoVerifFullResult(BaseModel):
     summary: Dict[str, Any]
     previousFactureNum: Optional[str] = None
     lineStatuts: Dict[int, LineStatutItem] = {}  # keyed by ligne_facture_id
+
+
+class SaveRapportPdfPayload(BaseModel):
+    pdf_base64: str  # PDF encodé en base64
+
+
+class SaveRapportPdfOut(BaseModel):
+    path: str  # Chemin absolu du fichier sauvegardé
+

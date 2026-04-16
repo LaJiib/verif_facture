@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import date
+import base64
+import calendar as cal_module
+import re
+from datetime import date, datetime
 from typing import Any, Dict, List
 import logging
 
@@ -21,6 +24,7 @@ from ..models import (
     LigneAbonnement,
     FactureReport,
 )
+from ..config import RAPPORTS_DIR
 from ..storage import delete_upload
 from .schemas import (
     EntrepriseBase,
@@ -39,6 +43,8 @@ from .schemas import (
     AbonnementAttachPayload,
     FactureRapportPayload,
     FactureRapportOut,
+    SaveRapportPdfPayload,
+    SaveRapportPdfOut,
 )
 
 logger = logging.getLogger("api_v2.cmd")
@@ -460,13 +466,17 @@ def attacher_abonnement(payload: AbonnementAttachPayload, db: Session = Depends(
 
     attached = 0
     for ligne_id in payload.ligne_ids:
-        existing = (
-            db.query(LigneAbonnement)
-            .filter(LigneAbonnement.ligne_id == ligne_id, LigneAbonnement.abonnement_id == abonnement_id)
-            .first()
-        )
-        if existing:
-            continue
+        # Supprimer les liaisons existantes pour ce même mois (ou sans date) afin d'éviter les conflits
+        q = db.query(LigneAbonnement).filter(LigneAbonnement.ligne_id == ligne_id)
+        if payload.date is not None:
+            first_day = payload.date.replace(day=1)
+            last_day = payload.date.replace(
+                day=cal_module.monthrange(payload.date.year, payload.date.month)[1]
+            )
+            q = q.filter(LigneAbonnement.date >= first_day, LigneAbonnement.date <= last_day)
+        else:
+            q = q.filter(LigneAbonnement.date.is_(None))
+        q.delete(synchronize_session=False)
         link = LigneAbonnement(ligne_id=ligne_id, abonnement_id=abonnement_id, date=payload.date)
         db.add(link)
         attached += 1
@@ -603,7 +613,10 @@ def upsert_facture_rapport(facture_id: int, payload: FactureRapportPayload, db: 
                 db.query(LigneAbonnement, Abonnement)
                 .join(Abonnement, LigneAbonnement.abonnement_id == Abonnement.id)
                 .filter(LigneAbonnement.ligne_id.in_([l.id for _, l in lignes]))
-                .order_by(LigneAbonnement.date.desc())
+                .filter(
+                    (LigneAbonnement.date <= facture.date) | LigneAbonnement.date.is_(None)
+                )
+                .order_by(LigneAbonnement.date.desc(), LigneAbonnement.id.desc())
                 .all()
             )
             abo_map = {}
@@ -666,3 +679,57 @@ def upsert_facture_rapport(facture_id: int, payload: FactureRapportPayload, db: 
         data=report.data,
         updated_at=report.updated_at,
     )
+
+
+def _sanitize_dirname(name: str) -> str:
+    """Sanitise un nom pour usage filesystem : remplace les caractères non sûrs par '_'."""
+    return re.sub(r"[^\w\-. ]", "_", name).strip().replace(" ", "_")
+
+
+@router.post("/factures/{facture_id}/rapport/pdf", response_model=SaveRapportPdfOut)
+def save_rapport_pdf(facture_id: int, payload: SaveRapportPdfPayload, db: Session = Depends(get_db)):
+    """Sauvegarde le PDF d'un rapport dans l'arborescence:
+    <RAPPORTS_DIR>/<entreprise>/<YYYY-MM-DD>/<lot>/<facture_num>.pdf
+    """
+    facture = (
+        db.query(Facture)
+        .join(Compte, Facture.compte_id == Compte.id)
+        .join(Entreprise, Compte.entreprise_id == Entreprise.id)
+        .filter(Facture.id == facture_id)
+        .first()
+    )
+    if not facture:
+        raise HTTPException(status_code=404, detail="Facture introuvable")
+
+    compte = facture.compte
+    entreprise = compte.entreprise
+    lot = compte.lot or compte.num
+
+    entreprise_dir = _sanitize_dirname(entreprise.nom)
+    lot_dir = _sanitize_dirname(str(lot))
+    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    facture_num_safe = _sanitize_dirname(facture.num)
+    pdf_filename = f"{facture_num_safe}.pdf"
+
+    # Supprimer tout ancien PDF pour cette facture dans tous les sous-dossiers de date
+    entreprise_path = RAPPORTS_DIR / entreprise_dir
+    if entreprise_path.exists():
+        for date_folder in entreprise_path.iterdir():
+            if date_folder.is_dir():
+                old_pdf = date_folder / lot_dir / pdf_filename
+                if old_pdf.exists():
+                    old_pdf.unlink()
+
+    # Créer le dossier cible et écrire le PDF
+    pdf_path = RAPPORTS_DIR / entreprise_dir / date_str / lot_dir / pdf_filename
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        pdf_bytes = base64.b64decode(payload.pdf_base64)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"PDF base64 invalide: {exc}") from exc
+
+    pdf_path.write_bytes(pdf_bytes)
+    logger.info("Rapport PDF sauvegarde: %s", pdf_path)
+
+    return SaveRapportPdfOut(path=str(pdf_path))

@@ -577,11 +577,8 @@ export async function listAbonnements(): Promise<Abonnement[]> {
 
 export async function attachAbonnementToLines(payload: AbonnementAttachPayload): Promise<AbonnementAttachResponse> {
   const safePayload = { ...payload };
-  // Backend schema expects null for optional date; avoid sending strings that trigger 422
   if (safePayload.date === undefined) {
     delete (safePayload as any).date;
-  } else if (safePayload.date !== null) {
-    safePayload.date = null;
   }
   const res = await fetch(`${V2_CMD}/abonnements/attacher`, {
     method: "POST",
@@ -878,6 +875,18 @@ export async function upsertFactureRapport(payload: {
     body: JSON.stringify(payload),
   });
   return handleResponse<FactureRapport>(res);
+}
+
+export async function saveRapportPdfToBackend(
+  factureId: number,
+  pdfBase64: string
+): Promise<{ path: string }> {
+  const res = await fetch(`${V2_CMD}/factures/${factureId}/rapport/pdf`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pdf_base64: pdfBase64 }),
+  });
+  return handleResponse<{ path: string }>(res);
 }
 
 // ============================================================================

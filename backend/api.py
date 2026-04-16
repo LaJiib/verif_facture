@@ -90,7 +90,7 @@ def create_app() -> FastAPI:
     if index_file.exists():
         @app.get("/", include_in_schema=False)
         def serve_index():
-            return FileResponse(index_file)
+            return FileResponse(index_file, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
     # Routers v2
     app.include_router(read.router)

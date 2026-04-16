@@ -17,11 +17,11 @@ import {
 } from "../newApi";
 import { decodeLineType, decodeFactureStatus, decodeLigneFactureStatus } from "../utils/codecs";
 import { STATUS_COLORS } from "../utils/statusBar";
-import { exportFactureReportPdf } from "../utils/pdfReport";
+import { exportFactureReportPdf, buildFactureReportPdfBase64 } from "../utils/pdfReport";
 import { exportFactureReportDocx } from "../utils/docxReport";
 import { runAutoVerification, StatutValeur, LigneAnomalie } from "../utils/autoVerification";
 import { importCSV } from "../csvImporter";
-import { fetchUploadContent } from "../newApi";
+import { fetchUploadContent, saveRapportPdfToBackend } from "../newApi";
 import LigneInsightModal from "./LigneInsightModal";
 
 function useViewportWidth(): number {
@@ -564,13 +564,13 @@ export default function CompteDetailModal({
       metricComments: factureMetricComments[factureCourante.facture_id] || {},
       groupStatuts: Object.fromEntries(
         resolvedGroupRows.map((row) => [
-          `${row.group.ligne_type}|${((row.group as any).prix_abo || 0).toFixed(2)}`,
+          `${row.group.ligne_type}|${(row.group.netUnit || 0).toFixed(2)}`,
           row.stat,
         ])
       ),
       groupComments: Object.fromEntries(
         resolvedGroupRows.map((row) => [
-          `${row.group.ligne_type}|${((row.group as any).prix_abo || 0).toFixed(2)}`,
+          `${row.group.ligne_type}|${(row.group.netUnit || 0).toFixed(2)}`,
           row.comment,
         ])
       ),
@@ -1819,6 +1819,56 @@ export default function CompteDetailModal({
     try {
       console.log("[RAPPORT][SAVE][UPSERT_PAYLOAD]", payload);
       await upsertFactureRapport(payload);
+
+      // Sauvegarde automatique du PDF en backend après enregistrement du rapport
+      try {
+        const glob = factureStatuts[selectedFactureId] || statutDefault;
+        const pdfData = {
+          entrepriseNom,
+          compteNum,
+          compteNom,
+          factureId: selectedFactureId,
+          factureNum: factureCourante?.facture_num,
+          factureDate: factureCourante?.facture_date,
+          factureStatut: detailFactures.find((f) => f.facture_id === selectedFactureId)?.facture_statut || 0,
+          ecart: factureCourante?.ecart ?? 0,
+          achat: factureCourante?.achat ?? 0,
+          metricStatuts: { ecart: glob.ecart, achat: glob.achat },
+          metricReals: factureMetricReals[selectedFactureId] || {},
+          metricComments: factureMetricComments[selectedFactureId] || {},
+          groupStatuts: Object.fromEntries(
+            resolvedGroupRows.map((row) => [
+              `${row.group.ligne_type}|${(row.group.netUnit || 0).toFixed(2)}`,
+              row.stat,
+            ])
+          ),
+          groupComments: Object.fromEntries(
+            resolvedGroupRows.map((row) => [
+              `${row.group.ligne_type}|${(row.group.netUnit || 0).toFixed(2)}`,
+              row.comment,
+            ])
+          ),
+          groupReals: factureGroupReals[selectedFactureId] || {},
+          globalComment: factureCommentaires[selectedFactureId],
+          groupes: ligneGroupesFacture.map((g) => ({
+            ligne_type: g.ligne_type,
+            prix_abo: g.count ? g.netAbo / g.count : 0,
+            count: g.count,
+            achat_total: g.achat,
+            ref_net: undefined,
+          })),
+          logoDataUrl: logoDataUrl || undefined,
+          logoWidthMm: logoSizeMm?.width,
+          logoHeightMm: logoSizeMm?.height,
+        };
+        const pdfBase64 = buildFactureReportPdfBase64(pdfData);
+        await saveRapportPdfToBackend(selectedFactureId, pdfBase64);
+        console.log("[RAPPORT][PDF][BACKEND] PDF sauvegarde en backend");
+      } catch (pdfErr) {
+        console.error("[RAPPORT][PDF][BACKEND] Erreur sauvegarde PDF automatique", pdfErr);
+        // Non bloquant : le rapport JSON est déjà sauvegardé
+      }
+
       // Determine statut facture: conteste > valide > importe
       // Les statuts globaux: on ne prend en compte que l'ecart (aboNet/achat sont geres par groupe)
       const ecartStatut = factureStatuts[selectedFactureId]?.ecart || "a_verifier";
